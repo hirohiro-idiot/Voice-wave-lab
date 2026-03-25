@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wave Voice Lab v3</title>
+  <title>Wave Voice Lab v3.1</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <h1>Wave Voice Lab v3</h1>
+      <h1>Wave Voice Lab v3.1</h1>
       <p class="subtitle">再生と編集を分離した音声編集ワークベンチ</p>
     </header>
 
@@ -27,29 +27,30 @@
         </div>
 
         <div class="row">
-          <label class="file-label">
-            音声ファイルを選択
-            <input
-              id="audioInput"
-              type="file"
-              accept=".wav,.mp3,.m4a,.aac,.ogg,.oga,.flac,.aif,.aiff,audio/*"
-            />
-          </label>
-
-          <label class="file-label">
-            動画ファイルを選択
-            <input
-              id="videoInput"
-              type="file"
-              accept=".mp4,.mov,.m4v,.webm,.ogv,video/*"
-            />
-          </label>
-
-          <label class="file-label alt">
-            なんでも選択
-            <input id="anyFileInput" type="file" />
-          </label>
+          <button id="openAudioPickerBtn">音声ファイルを選択</button>
+          <button id="openVideoPickerBtn">動画ファイルを選択</button>
+          <button id="openAnyPickerBtn">なんでも選択</button>
         </div>
+
+        <input
+          id="audioInput"
+          class="hidden-file-input"
+          type="file"
+          accept=".wav,.mp3,.m4a,.aac,.ogg,.oga,.flac,.aif,.aiff,audio/*"
+        />
+
+        <input
+          id="videoInput"
+          class="hidden-file-input"
+          type="file"
+          accept=".mp4,.mov,.m4v,.webm,.ogv,video/*"
+        />
+
+        <input
+          id="anyFileInput"
+          class="hidden-file-input"
+          type="file"
+        />
 
         <div class="row">
           <div id="fileInfo">ファイル未選択</div>
@@ -120,7 +121,7 @@
         </div>
 
         <p class="hint">
-          青バーが編集始点と終点。ドラッグして範囲を調整してください。通常時は波形を触っても編集されません。
+          青い縦バーが編集始点と終点です。バーをドラッグして範囲を調整してください。通常時は波形を触っても編集されません。
         </p>
       </section>
 
@@ -169,10 +170,7 @@
       <section class="panel help-panel">
         <h2>使い方</h2>
         <p>
-          まず録音またはファイル読込をします。<br>
-          通常画面では再生・シーク・範囲選択だけを行います。<br>
-          青い始点・終点バーを動かして範囲を決め、「選択範囲を編集」を押すと編集モードに入ります。<br>
-          編集モードではその範囲だけ拡大表示され、タッチ編集できます。
+          まず録音またはファイル読込をします。通常画面では再生・シーク・範囲選択だけを行います。青い始点・終点バーを動かして範囲を決め、「選択範囲を編集」を押すと編集モードに入ります。編集モードではその範囲だけ拡大表示され、タッチ編集できます。
         </p>
       </section>
     </main>
