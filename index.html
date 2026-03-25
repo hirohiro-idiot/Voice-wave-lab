@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wave Voice Lab v2</title>
+  <title>Wave Voice Lab v3</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <h1>Wave Voice Lab v2</h1>
-      <p class="subtitle">録音 / 音声読込 / 動画読込 / 保存 / 波形編集 / 再生</p>
+      <h1>Wave Voice Lab v3</h1>
+      <p class="subtitle">再生と編集を分離した音声編集ワークベンチ</p>
     </header>
 
     <main class="main">
@@ -44,9 +44,7 @@
               accept=".mp4,.mov,.m4v,.webm,.ogv,video/*"
             />
           </label>
-        </div>
 
-        <div class="row">
           <label class="file-label alt">
             なんでも選択
             <input id="anyFileInput" type="file" />
@@ -62,7 +60,7 @@
         <h2>素材ライブラリ</h2>
 
         <div class="row">
-          <input id="saveNameInput" type="text" placeholder="保存名を入力" class="name-input" />
+          <input id="saveNameInput" class="name-input" type="text" placeholder="保存名を入力" />
           <button id="saveCurrentBtn" disabled>保存</button>
           <button id="saveEditedAsBtn" disabled>編集版を別保存</button>
           <button id="refreshLibraryBtn">一覧更新</button>
@@ -71,50 +69,72 @@
         <div id="libraryList" class="library-list"></div>
       </section>
 
-      <section class="panel waveform-panel">
-        <div class="playback-bar">
+      <section class="panel player-panel">
+        <h2>再生</h2>
+
+        <div class="row controls-row">
+          <button id="rewindBtn" disabled>-10秒</button>
+          <button id="playBtn" disabled>再生</button>
+          <button id="pauseBtn" disabled>一時停止</button>
+          <button id="forwardBtn" disabled>+10秒</button>
+          <button id="stopBtn" disabled>停止</button>
+        </div>
+
+        <div class="seek-wrap">
+          <span id="currentTimeLabel">0.00s</span>
+          <input id="seekBar" type="range" min="0" max="1" step="0.001" value="0" disabled />
+          <span id="durationLabel">0.00s</span>
+        </div>
+
+        <div class="row small-row">
           <span id="playbackModeInfo">再生対象: なし</span>
           <span id="playbackTimeInfo">再生位置: -</span>
         </div>
+      </section>
 
-        <div class="canvas-wrap">
-          <canvas id="waveCanvas"></canvas>
+      <section class="panel waveform-panel">
+        <h2>全体波形</h2>
+
+        <div class="canvas-wrap main-canvas-wrap">
+          <canvas id="mainWaveCanvas"></canvas>
         </div>
 
         <div class="wave-info">
           <span id="viewInfo">表示範囲: 全体</span>
           <span id="selectionInfo">選択範囲: なし</span>
         </div>
-      </section>
 
-      <section class="panel controls">
-        <h2>再生</h2>
-        <div class="row">
-          <button id="playOriginalBtn" disabled>元音声再生</button>
-          <button id="playEditedBtn" disabled>編集後再生</button>
-          <button id="playSelectionBtn" disabled>選択再生</button>
-          <button id="stopBtn" disabled>停止</button>
-        </div>
-      </section>
-
-      <section class="panel navigation-panel">
-        <h2>表示操作</h2>
-
-        <div class="row">
+        <div class="row controls-row">
           <button id="scrollLeftBtn" disabled>← 左へ</button>
           <button id="scrollRightBtn" disabled>右へ →</button>
-        </div>
-
-        <div class="row">
           <button id="zoomInBtn" disabled>拡大</button>
           <button id="zoomOutBtn" disabled>縮小</button>
-          <button id="zoomToSelectionBtn" disabled>選択範囲へズーム</button>
           <button id="fullViewBtn" disabled>全体表示</button>
         </div>
+
+        <div class="row controls-row">
+          <button id="playSelectionBtn" disabled>選択範囲再生</button>
+          <button id="zoomToSelectionBtn" disabled>選択範囲へズーム</button>
+          <button id="resetSelectionBtn" disabled>選択解除</button>
+          <button id="openEditorBtn" disabled>選択範囲を編集</button>
+        </div>
+
+        <p class="hint">
+          青バーが編集始点と終点。ドラッグして範囲を調整してください。通常時は波形を触っても編集されません。
+        </p>
       </section>
 
-      <section class="panel editor-panel">
-        <h2>編集</h2>
+      <section class="panel editor-panel hidden" id="editorPanel">
+        <h2>編集モード</h2>
+
+        <div class="row small-row">
+          <span id="editorRangeInfo">編集範囲: -</span>
+          <span id="editorHint">この範囲だけ編集できます</span>
+        </div>
+
+        <div class="canvas-wrap editor-canvas-wrap">
+          <canvas id="editWaveCanvas"></canvas>
+        </div>
 
         <div class="editor-row">
           <label for="toolSelect">編集ツール</label>
@@ -123,14 +143,13 @@
             <option value="smooth">Smooth（なめらか化）</option>
             <option value="gain">Gain（局所音量アップ）</option>
             <option value="erase">Erase（局所音量ダウン）</option>
-            <option value="select">Select（範囲選択）</option>
           </select>
         </div>
 
         <div class="editor-row">
           <label for="brushSize">ブラシ幅</label>
-          <input type="range" id="brushSize" min="10" max="400" value="80" />
-          <span id="brushSizeValue">80</span>
+          <input type="range" id="brushSize" min="5" max="300" value="60" />
+          <span id="brushSizeValue">60</span>
         </div>
 
         <div class="editor-row">
@@ -139,9 +158,10 @@
           <span id="strengthValue">30</span>
         </div>
 
-        <div class="row">
+        <div class="row controls-row">
           <button id="undoBtn" disabled>元に戻す</button>
-          <button id="resetBtn" disabled>編集リセット</button>
+          <button id="cancelEditBtn">キャンセル</button>
+          <button id="applyEditBtn">編集確定</button>
           <button id="saveWavBtn" disabled>WAV保存</button>
         </div>
       </section>
@@ -149,11 +169,10 @@
       <section class="panel help-panel">
         <h2>使い方</h2>
         <p>
-          まず録音またはファイル読込を行います。<br>
-          波形上で Select を使うと範囲選択できます。<br>
-          横スクロールは左右ボタン、拡大縮小は別ボタンで行います。<br>
-          保存するとブラウザ内ライブラリに登録されます。<br>
-          編集版は別素材として保存できます。
+          まず録音またはファイル読込をします。<br>
+          通常画面では再生・シーク・範囲選択だけを行います。<br>
+          青い始点・終点バーを動かして範囲を決め、「選択範囲を編集」を押すと編集モードに入ります。<br>
+          編集モードではその範囲だけ拡大表示され、タッチ編集できます。
         </p>
       </section>
     </main>
