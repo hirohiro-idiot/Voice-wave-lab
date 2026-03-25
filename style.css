@@ -85,6 +85,10 @@ body {
   cursor: pointer;
 }
 
+.file-label.alt {
+  background: #444;
+}
+
 .file-label input {
   display: none;
 }
@@ -157,6 +161,7 @@ input[type="range"] {
 #fileInfo {
   color: #444;
   word-break: break-all;
+  line-height: 1.6;
 }
 
 .help-panel p {
