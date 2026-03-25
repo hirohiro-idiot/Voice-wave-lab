@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Wave Voice Lab</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1>Wave Voice Lab</h1>
+      <p class="subtitle">録音 → 波形表示 → タッチ編集 → 再生</p>
+    </header>
+
+    <main class="main">
+      <section class="panel status-panel">
+        <div id="status">準備完了</div>
+        <div id="timeInfo">録音時間: 0.0 秒</div>
+      </section>
+
+      <section class="panel waveform-panel">
+        <div class="canvas-wrap">
+          <canvas id="waveCanvas"></canvas>
+        </div>
+
+        <div class="wave-info">
+          <span id="viewInfo">表示範囲: 全体</span>
+          <span id="selectionInfo">選択範囲: なし</span>
+        </div>
+      </section>
+
+      <section class="panel controls">
+        <div class="row">
+          <button id="recordBtn">録音開始</button>
+          <button id="playOriginalBtn" disabled>元音声再生</button>
+          <button id="playEditedBtn" disabled>編集後再生</button>
+        </div>
+
+        <div class="row">
+          <button id="undoBtn" disabled>元に戻す</button>
+          <button id="resetBtn" disabled>編集リセット</button>
+          <button id="saveBtn" disabled>WAV保存</button>
+        </div>
+
+        <div class="row">
+          <button id="zoomInBtn" disabled>拡大</button>
+          <button id="zoomOutBtn" disabled>縮小</button>
+          <button id="fullViewBtn" disabled>全体表示</button>
+          <button id="playSelectionBtn" disabled>選択再生</button>
+        </div>
+      </section>
+
+      <section class="panel editor-panel">
+        <div class="editor-row">
+          <label for="toolSelect">編集ツール</label>
+          <select id="toolSelect">
+            <option value="draw">Draw（上下変形）</option>
+            <option value="smooth">Smooth（なめらか化）</option>
+            <option value="gain">Gain（局所音量）</option>
+            <option value="erase">Erase（局所弱化）</option>
+            <option value="select">Select（範囲選択）</option>
+          </select>
+        </div>
+
+        <div class="editor-row">
+          <label for="brushSize">ブラシ幅</label>
+          <input type="range" id="brushSize" min="10" max="400" value="80" />
+          <span id="brushSizeValue">80</span>
+        </div>
+
+        <div class="editor-row">
+          <label for="strength">強さ</label>
+          <input type="range" id="strength" min="1" max="100" value="30" />
+          <span id="strengthValue">30</span>
+        </div>
+      </section>
+
+      <section class="panel help-panel">
+        <h2>操作</h2>
+        <p>
+          Draw: 波形をドラッグして上下に変形。<br>
+          Smooth: 触れた周辺をなめらかに。<br>
+          Gain: 触れた周辺の振幅を増加。<br>
+          Erase: 触れた周辺の振幅を減少。<br>
+          Select: 範囲選択して部分再生。
+        </p>
+      </section>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
