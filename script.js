@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.6
-// 音声専用 / 超拡大 / 選択範囲保存 / 編集画面ナビ/編集切替修正版
+// Wave Voice Lab v4.7
+// 音声専用 / 精密表示 / 元波形オーバーレイ / A/B/重ね表示
 // =====================================================
 
 // ------------------------------
@@ -69,6 +69,8 @@ const editModeToggleBtn = document.getElementById("editModeToggleBtn");
 const editZoomInBtn = document.getElementById("editZoomInBtn");
 const editZoomOutBtn = document.getElementById("editZoomOutBtn");
 const editFullViewBtn = document.getElementById("editFullViewBtn");
+const precisionToggleBtn = document.getElementById("precisionToggleBtn");
+const overlayModeBtn = document.getElementById("overlayModeBtn");
 
 const mainCanvas = document.getElementById("mainWaveCanvas");
 const mainCtx = mainCanvas.getContext("2d");
@@ -140,9 +142,12 @@ let editSession = {
   viewStartSample: null,
   viewEndSample: null,
   interactionMode: "navigate", // navigate / draw
+  precisionMode: false,
+  overlayMode: "overlay", // edited / original / overlay
   snapshotBeforeEdit: null,
   historyStack: [],
 };
+
 let isEditPointerDown = false;
 let editLastX = null;
 let editLastY = null;
@@ -161,7 +166,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v46";
+const DB_NAME = "wave_voice_lab_db_v47";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -320,6 +325,19 @@ function setEditInteractionMode(mode) {
 
   isEditPointerDown = false;
   editPointerState.clear();
+}
+
+function updatePrecisionButton() {
+  precisionToggleBtn.textContent = `精密表示: ${editSession.precisionMode ? "ON" : "OFF"}`;
+}
+
+function updateOverlayButton() {
+  const map = {
+    overlay: "表示: 重ね",
+    edited: "表示: 編集後のみ",
+    original: "表示: 元のみ",
+  };
+  overlayModeBtn.textContent = map[editSession.overlayMode];
 }
 
 brushSizeInput.addEventListener("input", updateBrushLabels);
@@ -944,6 +962,10 @@ function resetEditView() {
   drawEditWaveform();
 }
 
+function getEditMinLength() {
+  return editSession.precisionMode ? 1 : 8;
+}
+
 function zoomEditView(factor, centerSample = null) {
   if (!isEditMode || !editedAudioBuffer) return;
 
@@ -956,7 +978,7 @@ function zoomEditView(factor, centerSample = null) {
     : centerSample;
 
   let newLength = Math.floor(currentLength * factor);
-  newLength = clamp(newLength, 8, absoluteEnd - absoluteStart);
+  newLength = clamp(newLength, getEditMinLength(), Math.max(1, absoluteEnd - absoluteStart));
 
   let newStart = Math.floor(center - newLength / 2);
   let newEnd = Math.floor(center + newLength / 2);
@@ -1019,7 +1041,7 @@ function centerBetweenTouches(points) {
 }
 
 // ------------------------------
-// Draw waveform
+// Waveform drawing
 // ------------------------------
 function drawWaveformToCanvas(ctx, canvas, buffer, startSample, endSample) {
   const width = canvas.clientWidth;
@@ -1069,6 +1091,65 @@ function drawWaveformToCanvas(ctx, canvas, buffer, startSample, endSample) {
     ctx.moveTo(x, y1);
     ctx.lineTo(x, y2);
     ctx.stroke();
+  }
+}
+
+function drawPreciseLine(ctx, data, startSample, endSample, width, height, strokeStyle, lineWidth = 1.4) {
+  const range = endSample - startSample;
+  if (range <= 0) return;
+
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = lineWidth;
+  ctx.beginPath();
+
+  for (let i = startSample; i <= endSample; i++) {
+    const ratioX = (i - startSample) / Math.max(1, range);
+    const x = ratioX * width;
+    const y = ((1 - data[i]) * 0.5) * height;
+
+    if (i === startSample) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+
+  ctx.stroke();
+}
+
+function drawEditWaveBackground() {
+  const width = editCanvas.clientWidth;
+  const height = editCanvas.clientHeight;
+
+  editCtx.clearRect(0, 0, width, height);
+  editCtx.fillStyle = "#fafafa";
+  editCtx.fillRect(0, 0, width, height);
+
+  editCtx.strokeStyle = "#d0d0d0";
+  editCtx.lineWidth = 1;
+  editCtx.beginPath();
+  editCtx.moveTo(0, height / 2);
+  editCtx.lineTo(width, height / 2);
+  editCtx.stroke();
+
+  if (!editSession.precisionMode) return;
+
+  const vLines = 8;
+  const hLines = 6;
+  editCtx.strokeStyle = "rgba(0,0,0,0.08)";
+  editCtx.lineWidth = 1;
+
+  for (let i = 1; i < vLines; i++) {
+    const x = (width / vLines) * i;
+    editCtx.beginPath();
+    editCtx.moveTo(x, 0);
+    editCtx.lineTo(x, height);
+    editCtx.stroke();
+  }
+
+  for (let i = 1; i < hLines; i++) {
+    const y = (height / hLines) * i;
+    editCtx.beginPath();
+    editCtx.moveTo(0, y);
+    editCtx.lineTo(width, y);
+    editCtx.stroke();
   }
 }
 
@@ -1125,24 +1206,81 @@ function drawEditWaveform() {
     return;
   }
 
-  drawWaveformToCanvas(
-    editCtx,
-    editCanvas,
-    editedAudioBuffer,
-    editSession.viewStartSample,
-    editSession.viewEndSample
-  );
+  const width = editCanvas.clientWidth;
+  const height = editCanvas.clientHeight;
+  const start = editSession.viewStartSample;
+  const end = editSession.viewEndSample;
+
+  drawEditWaveBackground();
+
+  const showOriginal = editSession.overlayMode === "original" || editSession.overlayMode === "overlay";
+  const showEdited = editSession.overlayMode === "edited" || editSession.overlayMode === "overlay";
+
+  const precise = editSession.precisionMode;
+  const origData = originalAudioBuffer ? originalAudioBuffer.getChannelData(0) : null;
+  const editData = editedAudioBuffer.getChannelData(0);
+
+  if (!precise) {
+    if (showOriginal && originalAudioBuffer) {
+      editCtx.save();
+      editCtx.globalAlpha = editSession.overlayMode === "overlay" ? 0.85 : 1.0;
+      drawWaveformToCanvas(editCtx, editCanvas, originalAudioBuffer, start, end);
+      editCtx.restore();
+
+      drawEditWaveBackground();
+    }
+
+    if (showEdited && editedAudioBuffer) {
+      drawWaveformToCanvas(editCtx, editCanvas, editedAudioBuffer, start, end);
+    }
+
+    if (showOriginal && showEdited && originalAudioBuffer) {
+      drawEditWaveBackground();
+      drawWaveformToCanvas(editCtx, editCanvas, editedAudioBuffer, start, end);
+
+      editCtx.strokeStyle = "rgba(220, 40, 40, 0.95)";
+      editCtx.lineWidth = 1.2;
+      const samplesPerPixel = Math.max(1, Math.floor((end - start) / width));
+
+      for (let x = 0; x < width; x++) {
+        const s = start + x * samplesPerPixel;
+        const e = Math.min(s + samplesPerPixel, end);
+
+        let min = 1;
+        let max = -1;
+
+        for (let i = s; i < e; i++) {
+          const v = origData[i];
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+
+        const y1 = ((1 - max) * 0.5) * height;
+        const y2 = ((1 - min) * 0.5) * height;
+
+        editCtx.beginPath();
+        editCtx.moveTo(x, y1);
+        editCtx.lineTo(x, y2);
+        editCtx.stroke();
+      }
+    }
+  } else {
+    if (showOriginal && originalAudioBuffer) {
+      drawPreciseLine(editCtx, origData, start, end, width, height, "rgba(220,40,40,0.95)", 1.4);
+    }
+    if (showEdited) {
+      drawPreciseLine(editCtx, editData, start, end, width, height, "rgba(20,20,20,0.98)", 1.8);
+    }
+  }
 
   if (editedAudioBuffer && currentPlayheadSample != null) {
-    const s = editSession.viewStartSample;
-    const e = editSession.viewEndSample;
-    if (currentPlayheadSample >= s && currentPlayheadSample <= e) {
-      const x = ((currentPlayheadSample - s) / (e - s)) * editCanvas.clientWidth;
+    if (currentPlayheadSample >= start && currentPlayheadSample <= end) {
+      const x = ((currentPlayheadSample - start) / Math.max(1, end - start)) * width;
       editCtx.strokeStyle = "rgba(255, 0, 0, 0.95)";
       editCtx.lineWidth = 2;
       editCtx.beginPath();
       editCtx.moveTo(x, 0);
-      editCtx.lineTo(x, editCanvas.clientHeight);
+      editCtx.lineTo(x, height);
       editCtx.stroke();
     }
   }
@@ -1177,6 +1315,8 @@ function openEditMode() {
   editSession.endSample = e;
   editSession.viewStartSample = s;
   editSession.viewEndSample = e;
+  editSession.precisionMode = false;
+  editSession.overlayMode = "overlay";
   editSession.snapshotBeforeEdit = cloneAudioBuffer(editedAudioBuffer);
   editSession.historyStack = [];
 
@@ -1186,6 +1326,8 @@ function openEditMode() {
   setEditInteractionMode("navigate");
   updateEditorInfo();
   updatePlaybackInfoText();
+  updatePrecisionButton();
+  updateOverlayButton();
   undoBtn.disabled = true;
   drawEditWaveform();
   setStatus("編集モード");
@@ -1200,6 +1342,8 @@ function cancelEditMode() {
   editSession.endSample = null;
   editSession.viewStartSample = null;
   editSession.viewEndSample = null;
+  editSession.precisionMode = false;
+  editSession.overlayMode = "overlay";
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
@@ -1208,6 +1352,8 @@ function cancelEditMode() {
   undoBtn.disabled = true;
   playerState.lastMode = "selection";
   setEditInteractionMode("navigate");
+  updatePrecisionButton();
+  updateOverlayButton();
   updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
@@ -1219,6 +1365,8 @@ function applyEditMode() {
   editSession.endSample = null;
   editSession.viewStartSample = null;
   editSession.viewEndSample = null;
+  editSession.precisionMode = false;
+  editSession.overlayMode = "overlay";
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
@@ -1227,6 +1375,8 @@ function applyEditMode() {
   undoBtn.disabled = true;
   playerState.lastMode = "selection";
   setEditInteractionMode("navigate");
+  updatePrecisionButton();
+  updateOverlayButton();
   updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
@@ -1422,9 +1572,13 @@ async function loadMaterialFromDB(id) {
     editSession.endSample = null;
     editSession.viewStartSample = null;
     editSession.viewEndSample = null;
+    editSession.precisionMode = false;
+    editSession.overlayMode = "overlay";
     editSession.historyStack = [];
     editSession.snapshotBeforeEdit = null;
     setEditInteractionMode("navigate");
+    updatePrecisionButton();
+    updateOverlayButton();
     drawMainWaveform();
     drawEditWaveform();
     updateMainUIState();
@@ -1627,6 +1781,8 @@ function updateMainUIState() {
   editZoomInBtn.disabled = !isEditMode;
   editZoomOutBtn.disabled = !isEditMode;
   editFullViewBtn.disabled = !isEditMode;
+  precisionToggleBtn.disabled = !isEditMode;
+  overlayModeBtn.disabled = !isEditMode;
 
   if (!hasAudio) {
     seekBar.value = 0;
@@ -1642,6 +1798,8 @@ function updateMainUIState() {
   loopToggleBtn.textContent = label;
   editLoopToggleBtn.textContent = label;
   updatePlaybackInfoText();
+  updatePrecisionButton();
+  updateOverlayButton();
 }
 
 // ------------------------------
@@ -1839,7 +1997,6 @@ editCanvas.addEventListener("pointerdown", async (event) => {
     return;
   }
 
-  // navigate
   if (pointers.length === 1) {
     editPanLastCenterX = pos.x;
   } else if (pointers.length === 2) {
@@ -1878,7 +2035,6 @@ editCanvas.addEventListener("pointermove", (event) => {
     return;
   }
 
-  // navigate mode
   if (pointers.length === 1) {
     const x = pointers[0].x;
     const dx = x - editPanLastCenterX;
@@ -1912,7 +2068,7 @@ editCanvas.addEventListener("pointermove", (event) => {
     if (editPinchStartDistance > 0 && dist > 0) {
       const startLen = editPinchStartViewEnd - editPinchStartViewStart;
       let newLen = Math.floor(startLen * (editPinchStartDistance / dist));
-      newLen = clamp(newLen, 8, editSession.endSample - editSession.startSample);
+      newLen = clamp(newLen, getEditMinLength(), Math.max(1, editSession.endSample - editSession.startSample));
 
       const centerRatio = clamp(centerX / Math.max(1, editCanvas.clientWidth), 0, 1);
       const anchorSample = Math.floor(editPinchStartViewStart + centerRatio * startLen);
@@ -2087,6 +2243,21 @@ editFullViewBtn.addEventListener("click", () => {
   resetEditView();
 });
 
+precisionToggleBtn.addEventListener("click", () => {
+  editSession.precisionMode = !editSession.precisionMode;
+  updatePrecisionButton();
+  drawEditWaveform();
+});
+
+overlayModeBtn.addEventListener("click", () => {
+  if (editSession.overlayMode === "overlay") editSession.overlayMode = "edited";
+  else if (editSession.overlayMode === "edited") editSession.overlayMode = "original";
+  else editSession.overlayMode = "overlay";
+
+  updateOverlayButton();
+  drawEditWaveform();
+});
+
 undoBtn.addEventListener("click", () => {
   undoEditInSession();
 });
@@ -2150,6 +2321,8 @@ libraryList.addEventListener("click", async (event) => {
 function init() {
   bootStatus();
   setEditInteractionMode("navigate");
+  updatePrecisionButton();
+  updateOverlayButton();
   updateMainUIState();
   drawMainWaveform();
   drawEditWaveform();
