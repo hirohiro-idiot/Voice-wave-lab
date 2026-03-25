@@ -1,5 +1,5 @@
 // =====================================================
-// Wave Voice Lab v4.1
+// Wave Voice Lab v4.2
 // 音声専用 / ループ / 速度変更 / タッチズーム対応
 // =====================================================
 
@@ -111,15 +111,15 @@ let viewEnd = 0;
 
 let selectionStart = null;
 let selectionEnd = null;
-let draggingSelectionHandle = null; // "start" | "end" | null
+let draggingSelectionHandle = null;
 const selectionHandleThresholdPx = 20;
 
-// gesture state for main canvas
 let mainPointerState = new Map();
 let pinchStartDistance = 0;
 let pinchStartViewStart = 0;
 let pinchStartViewEnd = 0;
 let panLastCenterX = 0;
+let singlePointerMoved = false;
 let lastTapTime = 0;
 let lastTapX = 0;
 
@@ -145,7 +145,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v41";
+const DB_NAME = "wave_voice_lab_db_v42";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -281,6 +281,11 @@ strengthInput.addEventListener("input", updateBrushLabels);
 speedSlider.addEventListener("input", updateSpeedLabels);
 updateBrushLabels();
 updateSpeedLabels();
+
+// debug helper visible in UI
+function bootStatus() {
+  setStatus("JS起動完了");
+}
 
 // ------------------------------
 // Resize
@@ -422,6 +427,25 @@ async function handleFileLoad(file, sourceLabel = "音声ファイル") {
     alert("読み込みに失敗しました。mp3 / wav / m4a などで試してください。");
   }
 }
+
+// inline onchange handler
+window.handleAudioFileInline = async function (event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  fileInfoEl.textContent = `音声ファイル: ${file.name} / ${file.type || "type不明"}`;
+  setStatus("ファイル読込中...");
+
+  try {
+    await handleFileLoad(file, "音声ファイル");
+  } catch (err) {
+    console.error(err);
+    setStatus("ファイル読込失敗");
+    alert("ファイルの読み込みに失敗しました。");
+  }
+
+  event.target.value = "";
+};
 
 // ------------------------------
 // Recording
@@ -1446,6 +1470,7 @@ mainCanvas.addEventListener("pointerdown", async (event) => {
   mainCanvas.setPointerCapture(event.pointerId);
 
   const pointers = Array.from(mainPointerState.values());
+  singlePointerMoved = false;
 
   if (pointers.length === 1) {
     const x = pos.x;
@@ -1483,6 +1508,7 @@ mainCanvas.addEventListener("pointermove", (event) => {
 
   if (draggingSelectionHandle && pointers.length === 1) {
     const sample = mainCanvasXToSample(pos.x);
+    singlePointerMoved = true;
 
     if (draggingSelectionHandle === "start") {
       selectionStart = clamp(sample, 0, editedAudioBuffer.length);
@@ -1510,9 +1536,9 @@ mainCanvas.addEventListener("pointermove", (event) => {
   if (pointers.length === 1) {
     const currentX = pointers[0].x;
     const dx = currentX - panLastCenterX;
-    panLastCenterX = currentX;
 
-    if (Math.abs(dx) < 1) return;
+    if (Math.abs(dx) > 2) singlePointerMoved = true;
+    panLastCenterX = currentX;
 
     const samplesPerPx = (viewEnd - viewStart) / Math.max(1, mainCanvas.clientWidth);
     const shiftSamples = Math.round(-dx * samplesPerPx);
@@ -1571,20 +1597,19 @@ mainCanvas.addEventListener("pointermove", (event) => {
 });
 
 mainCanvas.addEventListener("pointerup", (event) => {
-  const now = performance.now();
   const pos = mainPointerState.get(event.pointerId);
   mainPointerState.delete(event.pointerId);
 
+  const wasDraggingHandle = draggingSelectionHandle !== null;
   if (mainPointerState.size === 0) {
     draggingSelectionHandle = null;
   }
 
   if (!editedAudioBuffer || isEditMode || !pos) return;
+  if (wasDraggingHandle || singlePointerMoved) return;
 
-  const movedOnHandle = draggingSelectionHandle !== null;
-  if (movedOnHandle) return;
-
-  if (now - lastTapTime < 300 && Math.abs(pos.x - lastTapX) < 20) {
+  const now = performance.now();
+  if (now - lastTapTime < 350 && Math.abs(pos.x - lastTapX) < 24) {
     const sample = mainCanvasXToSample(pos.x);
     const sec = sample / editedAudioBuffer.sampleRate;
     seekTo(sec);
@@ -1678,12 +1703,6 @@ recordBtn.addEventListener("click", async () => {
   } else {
     stopRecording();
   }
-});
-
-audioInput.addEventListener("change", async (event) => {
-  const file = event.target.files && event.target.files[0];
-  await handleFileLoad(file, "音声ファイル");
-  audioInput.value = "";
 });
 
 playBtn.addEventListener("click", async () => {
@@ -1823,6 +1842,7 @@ libraryList.addEventListener("click", async (event) => {
 // Init
 // ------------------------------
 function init() {
+  bootStatus();
   updateMainUIState();
   drawMainWaveform();
   drawEditWaveform();
