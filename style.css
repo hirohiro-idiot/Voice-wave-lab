@@ -121,6 +121,18 @@ input[type="range"] {
   min-width: 160px;
 }
 
+.inline-label {
+  color: #444;
+  min-width: 36px;
+}
+
+#speedLabel {
+  min-width: 56px;
+  text-align: right;
+  color: #444;
+  font-variant-numeric: tabular-nums;
+}
+
 #fileInfo {
   color: #444;
   word-break: break-all;
@@ -219,8 +231,7 @@ canvas {
   padding: 8px 12px;
 }
 
-.hint,
-.help-panel p {
+.hint {
   margin-bottom: 0;
   line-height: 1.7;
   color: #444;
