@@ -1,3 +1,10 @@
+// =====================================================
+// Wave Voice Lab v3
+// =====================================================
+
+// ------------------------------
+// DOM
+// ------------------------------
 const statusEl = document.getElementById("status");
 const timeInfoEl = document.getElementById("timeInfo");
 const fileInfoEl = document.getElementById("fileInfo");
@@ -17,84 +24,127 @@ const saveEditedAsBtn = document.getElementById("saveEditedAsBtn");
 const refreshLibraryBtn = document.getElementById("refreshLibraryBtn");
 const libraryList = document.getElementById("libraryList");
 
-const playOriginalBtn = document.getElementById("playOriginalBtn");
-const playEditedBtn = document.getElementById("playEditedBtn");
-const playSelectionBtn = document.getElementById("playSelectionBtn");
+const rewindBtn = document.getElementById("rewindBtn");
+const playBtn = document.getElementById("playBtn");
+const pauseBtn = document.getElementById("pauseBtn");
+const forwardBtn = document.getElementById("forwardBtn");
 const stopBtn = document.getElementById("stopBtn");
+const seekBar = document.getElementById("seekBar");
+const currentTimeLabel = document.getElementById("currentTimeLabel");
+const durationLabel = document.getElementById("durationLabel");
+
+const playSelectionBtn = document.getElementById("playSelectionBtn");
+const zoomToSelectionBtn = document.getElementById("zoomToSelectionBtn");
+const resetSelectionBtn = document.getElementById("resetSelectionBtn");
+const openEditorBtn = document.getElementById("openEditorBtn");
 
 const scrollLeftBtn = document.getElementById("scrollLeftBtn");
 const scrollRightBtn = document.getElementById("scrollRightBtn");
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
-const zoomToSelectionBtn = document.getElementById("zoomToSelectionBtn");
 const fullViewBtn = document.getElementById("fullViewBtn");
 
+const editorPanel = document.getElementById("editorPanel");
+const editorRangeInfo = document.getElementById("editorRangeInfo");
 const toolSelect = document.getElementById("toolSelect");
 const brushSizeInput = document.getElementById("brushSize");
 const strengthInput = document.getElementById("strength");
 const brushSizeValue = document.getElementById("brushSizeValue");
 const strengthValue = document.getElementById("strengthValue");
 const undoBtn = document.getElementById("undoBtn");
-const resetBtn = document.getElementById("resetBtn");
+const cancelEditBtn = document.getElementById("cancelEditBtn");
+const applyEditBtn = document.getElementById("applyEditBtn");
 const saveWavBtn = document.getElementById("saveWavBtn");
 
-const canvas = document.getElementById("waveCanvas");
-const ctx = canvas.getContext("2d");
+const mainCanvas = document.getElementById("mainWaveCanvas");
+const mainCtx = mainCanvas.getContext("2d");
+const editCanvas = document.getElementById("editWaveCanvas");
+const editCtx = editCanvas.getContext("2d");
 
+// ------------------------------
+// Audio state
+// ------------------------------
 let audioContext = null;
 let mediaStream = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordingStartTime = 0;
 let recordingTimerId = null;
+
 let currentSourceNode = null;
+let currentGainNode = null;
 
 let originalAudioBuffer = null;
 let editedAudioBuffer = null;
-let historyStack = [];
+
 let currentMaterialName = "";
 let currentMaterialSource = "";
 
+let playerState = {
+  isPlaying: false,
+  mode: "none", // full / selection
+  playStartSec: 0,
+  playEndSec: 0,
+  pausedAtSec: 0,
+  startedAtPerf: 0,
+};
+
+let playbackAnimationFrame = null;
+let currentPlayheadSample = null;
+let isSeeking = false;
+
+// ------------------------------
+// View state
+// ------------------------------
 let viewStart = 0;
 let viewEnd = 0;
 
+// selection bars on main view
 let selectionStart = null;
 let selectionEnd = null;
+let draggingSelectionHandle = null; // "start" | "end" | null
+const selectionHandleThresholdPx = 20;
 
-let isPointerDown = false;
-let lastPointerX = null;
-let lastPointerY = null;
+// ------------------------------
+// Edit mode state
+// ------------------------------
+let isEditMode = false;
+let editSession = {
+  startSample: null,
+  endSample: null,
+  snapshotBeforeEdit: null,
+  historyStack: [],
+};
+let isEditPointerDown = false;
+let editLastX = null;
+let editLastY = null;
 
-let playbackAnimationFrame = null;
-let playbackStartTime = 0;
-let playbackOffsetSec = 0;
-let playbackEndSec = 0;
-let playbackMode = "none";
-let currentPlayheadSample = null;
-
+// ------------------------------
+// Canvas scaling
+// ------------------------------
 let dpr = Math.max(1, window.devicePixelRatio || 1);
 
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db";
+const DB_NAME = "wave_voice_lab_db_v3";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
 function openDB() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onupgradeneeded = () => {
-      const db = request.result;
+    req.onupgradeneeded = () => {
+      const db = req.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
         store.createIndex("updatedAt", "updatedAt", { unique: false });
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
   });
 }
 
@@ -112,13 +162,13 @@ async function dbGetAllMaterials() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
-    const request = tx.objectStore(STORE_NAME).getAll();
-    request.onsuccess = () => {
-      const items = request.result || [];
+    const req = tx.objectStore(STORE_NAME).getAll();
+    req.onsuccess = () => {
+      const items = req.result || [];
       items.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
       resolve(items);
     };
-    request.onerror = () => reject(request.error);
+    req.onerror = () => reject(req.error);
   });
 }
 
@@ -126,9 +176,9 @@ async function dbGetMaterial(id) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
-    const request = tx.objectStore(STORE_NAME).get(id);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    const req = tx.objectStore(STORE_NAME).get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
   });
 }
 
@@ -143,10 +193,58 @@ async function dbDeleteMaterial(id) {
 }
 
 // ------------------------------
-// General
+// Utilities
 // ------------------------------
 function setStatus(msg) {
   statusEl.textContent = msg;
+}
+
+function ensureAudioContext() {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+}
+
+async function unlockAudio() {
+  ensureAudioContext();
+  if (audioContext.state !== "running") {
+    try {
+      await audioContext.resume();
+    } catch (err) {
+      console.error("AudioContext resume failed", err);
+    }
+  }
+}
+
+function formatSec(sec) {
+  if (!Number.isFinite(sec)) return "0.00s";
+  return `${sec.toFixed(2)}s`;
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function clampSample(v) {
+  return Math.max(-1, Math.min(1, v));
+}
+
+function generateId() {
+  return `mat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function formatDate(ts) {
+  if (!ts) return "-";
+  return new Date(ts).toLocaleString();
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function updateBrushLabels() {
@@ -158,68 +256,28 @@ brushSizeInput.addEventListener("input", updateBrushLabels);
 strengthInput.addEventListener("input", updateBrushLabels);
 updateBrushLabels();
 
-function ensureAudioContext() {
-  if (!audioContext) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-  }
-}
-
-function resizeCanvas() {
+// ------------------------------
+// Resize
+// ------------------------------
+function resizeCanvas(canvas, ctx) {
   const rect = canvas.getBoundingClientRect();
   canvas.width = Math.floor(rect.width * dpr);
   canvas.height = Math.floor(rect.height * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  drawWaveform();
 }
 
-window.addEventListener("resize", resizeCanvas);
-setTimeout(resizeCanvas, 50);
-
-function enableEditingButtons(enabled) {
-  playOriginalBtn.disabled = !enabled;
-  playEditedBtn.disabled = !enabled;
-  stopBtn.disabled = !enabled;
-  resetBtn.disabled = !enabled;
-  saveWavBtn.disabled = !enabled;
-  zoomInBtn.disabled = !enabled;
-  zoomOutBtn.disabled = !enabled;
-  fullViewBtn.disabled = !enabled;
-  scrollLeftBtn.disabled = !enabled;
-  scrollRightBtn.disabled = !enabled;
-  saveCurrentBtn.disabled = !enabled;
-  saveEditedAsBtn.disabled = !enabled;
-  undoBtn.disabled = historyStack.length === 0 || !enabled;
-  updateSelectionDependentButtons();
+function resizeAllCanvases() {
+  resizeCanvas(mainCanvas, mainCtx);
+  resizeCanvas(editCanvas, editCtx);
+  drawMainWaveform();
+  drawEditWaveform();
 }
 
-function updateSelectionDependentButtons() {
-  const hasSel = selectionStart != null && selectionEnd != null && editedAudioBuffer;
-  playSelectionBtn.disabled = !hasSel;
-  zoomToSelectionBtn.disabled = !hasSel;
-}
-
-function clampSample(v) {
-  return Math.max(-1, Math.min(1, v));
-}
-
-function getFileExtension(name) {
-  const idx = name.lastIndexOf(".");
-  if (idx === -1) return "";
-  return name.slice(idx).toLowerCase();
-}
-
-function formatDate(ts) {
-  if (!ts) return "-";
-  const d = new Date(ts);
-  return d.toLocaleString();
-}
-
-function generateId() {
-  return `mat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-}
+window.addEventListener("resize", resizeAllCanvases);
+setTimeout(resizeAllCanvases, 50);
 
 // ------------------------------
-// AudioBuffer conversion
+// AudioBuffer helpers
 // ------------------------------
 function toMonoBuffer(buffer) {
   const mono = audioContext.createBuffer(1, buffer.length, buffer.sampleRate);
@@ -254,23 +312,16 @@ function cloneAudioBuffer(buffer) {
   return copy;
 }
 
-function pushHistory() {
-  if (!editedAudioBuffer) return;
-  historyStack.push(cloneAudioBuffer(editedAudioBuffer));
-  if (historyStack.length > 20) historyStack.shift();
-  undoBtn.disabled = historyStack.length === 0;
-}
-
 function audioBufferToChannelArrays(buffer) {
   const channels = [];
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
     channels.push(Array.from(buffer.getChannelData(ch)));
   }
   return {
-    sampleRate: buffer.sampleRate,
     numberOfChannels: buffer.numberOfChannels,
+    sampleRate: buffer.sampleRate,
     length: buffer.length,
-    channels
+    channels,
   };
 }
 
@@ -289,29 +340,43 @@ function channelArraysToAudioBuffer(data) {
 }
 
 // ------------------------------
-// Loading / recording
+// Loading audio
 // ------------------------------
+async function decodeFileToAudioBuffer(file) {
+  await unlockAudio();
+  const arrayBuffer = await file.arrayBuffer();
+  return await audioContext.decodeAudioData(arrayBuffer.slice(0));
+}
+
+function resetSelectionDefault() {
+  if (!editedAudioBuffer) {
+    selectionStart = null;
+    selectionEnd = null;
+    return;
+  }
+
+  const len = editedAudioBuffer.length;
+  selectionStart = Math.floor(len * 0.25);
+  selectionEnd = Math.floor(len * 0.35);
+  updateSelectionInfo();
+}
+
 function loadDecodedBuffer(decoded, label = "読込完了", source = "") {
   originalAudioBuffer = toMonoBuffer(decoded);
   editedAudioBuffer = cloneAudioBuffer(originalAudioBuffer);
-  historyStack = [];
-  currentMaterialSource = source;
-  clearSelection();
-  resetView();
-  enableEditingButtons(true);
-  drawWaveform();
-  setStatus(label);
-  if (!currentMaterialName) {
-    currentMaterialName = label;
-    saveNameInput.value = label;
-  }
-}
 
-async function decodeFileToAudioBuffer(file) {
-  ensureAudioContext();
-  const arrayBuffer = await file.arrayBuffer();
-  const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-  return decoded;
+  currentMaterialSource = source;
+  currentMaterialName = currentMaterialName || label;
+  saveNameInput.value = currentMaterialName;
+
+  resetView();
+  resetSelectionDefault();
+  stopPlayback();
+  updateMainUIState();
+  drawMainWaveform();
+  drawEditWaveform();
+  setStatus(label);
+  fileInfoEl.textContent = `${source}: ${currentMaterialName}`;
 }
 
 async function handleFileLoad(file, sourceLabel = "ファイル") {
@@ -334,23 +399,24 @@ async function handleFileLoad(file, sourceLabel = "ファイル") {
       "1. なんでも選択から選ぶ\n" +
       "2. 音声は mp3 / wav / m4a\n" +
       "3. 動画は mp4\n" +
-      "4. 動画に音声トラックが入っているか確認"
+      "4. 動画に音声トラックがあるか確認"
     );
   }
 }
 
+// ------------------------------
+// Recording
+// ------------------------------
 async function startRecording() {
   try {
-    ensureAudioContext();
+    await unlockAudio();
 
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(mediaStream);
     recordedChunks = [];
 
     mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        recordedChunks.push(event.data);
-      }
+      if (event.data.size > 0) recordedChunks.push(event.data);
     };
 
     mediaRecorder.onstop = async () => {
@@ -375,8 +441,8 @@ async function startRecording() {
     recordingTimerId = setInterval(updateRecordingTime, 100);
 
     recordBtn.textContent = "録音停止";
-    fileInfoEl.textContent = "マイク録音中";
     setStatus("録音中...");
+    fileInfoEl.textContent = "マイク録音中";
   } catch (err) {
     console.error(err);
     setStatus("マイク利用に失敗");
@@ -388,12 +454,10 @@ function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.stop();
   }
-
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
     mediaStream = null;
   }
-
   if (recordingTimerId) {
     clearInterval(recordingTimerId);
     recordingTimerId = null;
@@ -409,129 +473,213 @@ function updateRecordingTime() {
 }
 
 // ------------------------------
-// Playback
+// Player
 // ------------------------------
+function getBufferDuration() {
+  return editedAudioBuffer ? editedAudioBuffer.duration : 0;
+}
+
+function getCurrentPlaybackSec() {
+  if (!playerState.isPlaying) return playerState.pausedAtSec || 0;
+  const elapsed = (performance.now() - playerState.startedAtPerf) / 1000;
+  return clamp(playerState.playStartSec + elapsed, 0, playerState.playEndSec);
+}
+
 function stopPlaybackAnimation() {
   if (playbackAnimationFrame) {
     cancelAnimationFrame(playbackAnimationFrame);
     playbackAnimationFrame = null;
   }
-  currentPlayheadSample = null;
-  playbackMode = "none";
-  playbackModeInfoEl.textContent = "再生対象: なし";
-  playbackTimeInfoEl.textContent = "再生位置: -";
 }
 
-function stopCurrentPlayback() {
-  if (currentSourceNode) {
-    try {
-      currentSourceNode.stop();
-    } catch (e) {}
-    currentSourceNode = null;
+function updatePlayerUI() {
+  const duration = getBufferDuration();
+  const current = getCurrentPlaybackSec();
+
+  currentTimeLabel.textContent = formatSec(current);
+  durationLabel.textContent = formatSec(duration);
+  playbackTimeInfoEl.textContent = `再生位置: ${formatSec(current)}`;
+
+  if (!isSeeking) {
+    seekBar.value = duration > 0 ? (current / duration) : 0;
   }
-  stopPlaybackAnimation();
-  drawWaveform();
-  setStatus("停止");
+
+  if (editedAudioBuffer) {
+    currentPlayheadSample = Math.floor(current * editedAudioBuffer.sampleRate);
+  } else {
+    currentPlayheadSample = null;
+  }
+
+  drawMainWaveform();
+  if (isEditMode) drawEditWaveform();
 }
 
-function startPlaybackAnimation(buffer, startSec, endSec, modeLabel) {
-  playbackStartTime = performance.now();
-  playbackOffsetSec = startSec;
-  playbackEndSec = endSec;
-  playbackMode = modeLabel;
-  playbackModeInfoEl.textContent = `再生対象: ${modeLabel}`;
+function animatePlayback() {
+  updatePlayerUI();
 
-  const sampleRate = buffer.sampleRate;
-
-  function tick() {
-    const elapsed = (performance.now() - playbackStartTime) / 1000;
-    const currentSec = Math.min(playbackOffsetSec + elapsed, playbackEndSec);
-    currentPlayheadSample = Math.floor(currentSec * sampleRate);
-    playbackTimeInfoEl.textContent = `再生位置: ${currentSec.toFixed(2)}s`;
-    drawWaveform();
-
-    if (currentSec < playbackEndSec && currentSourceNode) {
-      playbackAnimationFrame = requestAnimationFrame(tick);
+  if (playerState.isPlaying) {
+    const cur = getCurrentPlaybackSec();
+    if (cur >= playerState.playEndSec - 0.005) {
+      stopPlayback(true);
+      return;
     }
+    playbackAnimationFrame = requestAnimationFrame(animatePlayback);
   }
-
-  tick();
 }
 
-async function playAudioBuffer(buffer, startSec = 0, endSec = null, modeLabel = "全体") {
-  if (!buffer) return;
+async function startPlaybackFrom(positionSec, mode = "full") {
+  if (!editedAudioBuffer) return;
 
-  ensureAudioContext();
-  stopCurrentPlayback();
+  await unlockAudio();
+  stopCurrentSourceOnly();
 
-  if (audioContext.state === "suspended") {
-    await audioContext.resume();
+  const duration = editedAudioBuffer.duration;
+  let startSec = clamp(positionSec, 0, duration);
+  let endSec = duration;
+  let modeLabel = "全体";
+
+  if (mode === "selection" && selectionStart != null && selectionEnd != null) {
+    const s = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+    const e = Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+    startSec = clamp(startSec, s, e);
+    endSec = e;
+    modeLabel = "選択範囲";
   }
 
-  const source = audioContext.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioContext.destination);
-  currentSourceNode = source;
-
-  const duration = buffer.duration;
-  const clampedStart = Math.max(0, Math.min(startSec, duration));
-  const clampedEnd = endSec == null ? duration : Math.max(clampedStart, Math.min(endSec, duration));
-  const playDuration = Math.max(0, clampedEnd - clampedStart);
-
-  if (playDuration <= 0) {
+  if (endSec <= startSec) {
     setStatus("再生範囲が不正です");
     return;
   }
 
+  const source = audioContext.createBufferSource();
+  const gainNode = audioContext.createGain();
+  source.buffer = editedAudioBuffer;
+  gainNode.gain.value = 1.0;
+  source.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+
+  currentSourceNode = source;
+  currentGainNode = gainNode;
+
+  playerState.isPlaying = true;
+  playerState.mode = mode;
+  playerState.playStartSec = startSec;
+  playerState.playEndSec = endSec;
+  playerState.pausedAtSec = startSec;
+  playerState.startedAtPerf = performance.now();
+
+  playbackModeInfoEl.textContent = `再生対象: ${modeLabel}`;
   setStatus("再生中...");
-  startPlaybackAnimation(buffer, clampedStart, clampedEnd, modeLabel);
 
   source.onended = () => {
-    if (currentSourceNode === source) {
-      currentSourceNode = null;
-      stopPlaybackAnimation();
-      drawWaveform();
-      setStatus("再生終了");
+    if (currentSourceNode === source && playerState.isPlaying) {
+      stopPlayback(true);
     }
   };
 
   try {
-    source.start(0, clampedStart, playDuration);
+    source.start(0, startSec, endSec - startSec);
   } catch (err) {
     console.error(err);
     setStatus("再生失敗");
-    alert("再生に失敗しました。ページを再読み込みして再度試してください。");
-  }
-}
-
-// ------------------------------
-// View / selection
-// ------------------------------
-function clearSelection() {
-  selectionStart = null;
-  selectionEnd = null;
-  selectionInfoEl.textContent = "選択範囲: なし";
-  updateSelectionDependentButtons();
-}
-
-function updateSelectionInfo() {
-  if (selectionStart == null || selectionEnd == null || !editedAudioBuffer) {
-    selectionInfoEl.textContent = "選択範囲: なし";
-    updateSelectionDependentButtons();
+    alert("再生に失敗しました。ページ再読み込み後にもう一度試してください。");
     return;
   }
 
-  const s = Math.min(selectionStart, selectionEnd);
-  const e = Math.max(selectionStart, selectionEnd);
-  const startSec = (s / editedAudioBuffer.sampleRate).toFixed(2);
-  const endSec = (e / editedAudioBuffer.sampleRate).toFixed(2);
-
-  selectionInfoEl.textContent = `選択範囲: ${startSec}s ～ ${endSec}s`;
-  updateSelectionDependentButtons();
+  stopPlaybackAnimation();
+  playbackAnimationFrame = requestAnimationFrame(animatePlayback);
+  updatePlayerUI();
 }
 
-function resetView() {
+function stopCurrentSourceOnly() {
+  if (currentSourceNode) {
+    try {
+      currentSourceNode.stop();
+    } catch (e) {}
+  }
+  currentSourceNode = null;
+  currentGainNode = null;
+}
+
+function pausePlayback() {
+  if (!playerState.isPlaying) return;
+
+  playerState.pausedAtSec = getCurrentPlaybackSec();
+  playerState.isPlaying = false;
+  stopCurrentSourceOnly();
+  stopPlaybackAnimation();
+  setStatus("一時停止");
+  updatePlayerUI();
+}
+
+function stopPlayback(fromEnded = false) {
+  if (playerState.isPlaying || currentSourceNode) {
+    stopCurrentSourceOnly();
+  }
+
+  stopPlaybackAnimation();
+  playerState.isPlaying = false;
+  playerState.mode = "none";
+  playerState.playStartSec = 0;
+  playerState.playEndSec = 0;
+  playerState.startedAtPerf = 0;
+
+  if (!fromEnded) {
+    playerState.pausedAtSec = 0;
+    playbackModeInfoEl.textContent = "再生対象: なし";
+    setStatus("停止");
+  } else {
+    playerState.pausedAtSec = 0;
+    playbackModeInfoEl.textContent = "再生対象: なし";
+    setStatus("再生終了");
+  }
+
+  updatePlayerUI();
+}
+
+async function playCurrent() {
+  const start = playerState.pausedAtSec || 0;
+  await startPlaybackFrom(start, "full");
+}
+
+async function playSelection() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+  const start = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+  await startPlaybackFrom(start, "selection");
+}
+
+function seekTo(sec) {
   if (!editedAudioBuffer) return;
+
+  const duration = editedAudioBuffer.duration;
+  const newSec = clamp(sec, 0, duration);
+  playerState.pausedAtSec = newSec;
+
+  if (playerState.isPlaying) {
+    const mode = playerState.mode === "selection" ? "selection" : "full";
+    startPlaybackFrom(newSec, mode);
+  } else {
+    updatePlayerUI();
+  }
+}
+
+function skipBy(deltaSec) {
+  if (!editedAudioBuffer) return;
+  const cur = getCurrentPlaybackSec();
+  seekTo(cur + deltaSec);
+}
+
+// ------------------------------
+// Main view
+// ------------------------------
+function resetView() {
+  if (!editedAudioBuffer) {
+    viewStart = 0;
+    viewEnd = 0;
+    updateViewInfo();
+    return;
+  }
+
   viewStart = 0;
   viewEnd = editedAudioBuffer.length;
   updateViewInfo();
@@ -546,11 +694,32 @@ function updateViewInfo() {
   const total = editedAudioBuffer.length;
   const startRatio = ((viewStart / total) * 100).toFixed(1);
   const endRatio = ((viewEnd / total) * 100).toFixed(1);
-
   const startSec = (viewStart / editedAudioBuffer.sampleRate).toFixed(2);
   const endSec = (viewEnd / editedAudioBuffer.sampleRate).toFixed(2);
-
   viewInfoEl.textContent = `表示範囲: ${startRatio}% ～ ${endRatio}% (${startSec}s ～ ${endSec}s)`;
+}
+
+function updateSelectionInfo() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) {
+    selectionInfoEl.textContent = "選択範囲: なし";
+    updateMainUIState();
+    return;
+  }
+
+  const s = Math.min(selectionStart, selectionEnd);
+  const e = Math.max(selectionStart, selectionEnd);
+
+  selectionInfoEl.textContent =
+    `選択範囲: ${(s / editedAudioBuffer.sampleRate).toFixed(2)}s ～ ${(e / editedAudioBuffer.sampleRate).toFixed(2)}s`;
+
+  updateMainUIState();
+}
+
+function clearSelection() {
+  selectionStart = null;
+  selectionEnd = null;
+  updateSelectionInfo();
+  drawMainWaveform();
 }
 
 function scrollView(direction) {
@@ -566,20 +735,17 @@ function scrollView(direction) {
     newEnd -= newStart;
     newStart = 0;
   }
-
   if (newEnd > editedAudioBuffer.length) {
     const over = newEnd - editedAudioBuffer.length;
     newStart -= over;
     newEnd = editedAudioBuffer.length;
   }
 
-  newStart = Math.max(0, newStart);
-  newEnd = Math.min(editedAudioBuffer.length, newEnd);
+  viewStart = clamp(newStart, 0, editedAudioBuffer.length);
+  viewEnd = clamp(newEnd, 0, editedAudioBuffer.length);
 
-  viewStart = newStart;
-  viewEnd = newEnd;
   updateViewInfo();
-  drawWaveform();
+  drawMainWaveform();
 }
 
 function zoomView(factor) {
@@ -591,7 +757,7 @@ function zoomView(factor) {
 
   const minLength = 500;
   const maxLength = editedAudioBuffer.length;
-  newLength = Math.max(minLength, Math.min(maxLength, newLength));
+  newLength = clamp(newLength, minLength, maxLength);
 
   let newStart = Math.floor(center - newLength / 2);
   let newEnd = Math.floor(center + newLength / 2);
@@ -606,13 +772,11 @@ function zoomView(factor) {
     newEnd = editedAudioBuffer.length;
   }
 
-  newStart = Math.max(0, newStart);
-  newEnd = Math.min(editedAudioBuffer.length, newEnd);
+  viewStart = clamp(newStart, 0, editedAudioBuffer.length);
+  viewEnd = clamp(newEnd, 0, editedAudioBuffer.length);
 
-  viewStart = newStart;
-  viewEnd = newEnd;
   updateViewInfo();
-  drawWaveform();
+  drawMainWaveform();
 }
 
 function zoomToSelection() {
@@ -620,46 +784,53 @@ function zoomToSelection() {
 
   const s = Math.min(selectionStart, selectionEnd);
   const e = Math.max(selectionStart, selectionEnd);
-
   if (e - s < 10) return;
 
   viewStart = s;
   viewEnd = e;
   updateViewInfo();
-  drawWaveform();
+  drawMainWaveform();
 }
 
 // ------------------------------
 // Canvas mapping
 // ------------------------------
-function canvasXToSample(x) {
+function mainCanvasXToSample(x) {
   if (!editedAudioBuffer) return 0;
-  const width = canvas.clientWidth;
-  const ratio = Math.max(0, Math.min(1, x / width));
+  const width = mainCanvas.clientWidth;
+  const ratio = clamp(x / width, 0, 1);
   return Math.floor(viewStart + ratio * (viewEnd - viewStart));
 }
 
-function canvasYToAmplitude(y) {
-  const height = canvas.clientHeight;
-  const ratio = 1 - (y / height) * 2;
-  return Math.max(-1, Math.min(1, ratio));
-}
-
-function sampleToCanvasX(sampleIndex) {
-  const width = canvas.clientWidth;
+function sampleToMainCanvasX(sample) {
   if (viewEnd === viewStart) return 0;
-  return ((sampleIndex - viewStart) / (viewEnd - viewStart)) * width;
+  return ((sample - viewStart) / (viewEnd - viewStart)) * mainCanvas.clientWidth;
+}
+
+function getMainCanvasLocalPos(event) {
+  const rect = mainCanvas.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function getEditCanvasLocalPos(event) {
+  const rect = editCanvas.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
 }
 
 // ------------------------------
-// Drawing
+// Draw main waveform
 // ------------------------------
-function drawWaveform() {
+function drawWaveformToCanvas(ctx, canvas, buffer, startSample, endSample) {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
 
   ctx.clearRect(0, 0, width, height);
-
   ctx.fillStyle = "#fafafa";
   ctx.fillRect(0, 0, width, height);
 
@@ -670,22 +841,22 @@ function drawWaveform() {
   ctx.lineTo(width, height / 2);
   ctx.stroke();
 
-  if (!editedAudioBuffer) {
+  if (!buffer) {
     ctx.fillStyle = "#888";
     ctx.font = "16px sans-serif";
     ctx.fillText("ここに波形が表示されます", 20, height / 2 - 10);
     return;
   }
 
-  const data = editedAudioBuffer.getChannelData(0);
-  const samplesPerPixel = Math.max(1, Math.floor((viewEnd - viewStart) / width));
+  const data = buffer.getChannelData(0);
+  const samplesPerPixel = Math.max(1, Math.floor((endSample - startSample) / width));
 
   ctx.strokeStyle = "#111";
   ctx.lineWidth = 1;
 
   for (let x = 0; x < width; x++) {
-    const start = viewStart + x * samplesPerPixel;
-    const end = Math.min(start + samplesPerPixel, viewEnd);
+    const start = startSample + x * samplesPerPixel;
+    const end = Math.min(start + samplesPerPixel, endSample);
 
     let min = 1;
     let max = -1;
@@ -704,47 +875,178 @@ function drawWaveform() {
     ctx.lineTo(x, y2);
     ctx.stroke();
   }
+}
 
-  if (selectionStart != null && selectionEnd != null) {
+function drawMainWaveform() {
+  drawWaveformToCanvas(mainCtx, mainCanvas, editedAudioBuffer, viewStart, viewEnd);
+
+  const height = mainCanvas.clientHeight;
+
+  if (editedAudioBuffer && selectionStart != null && selectionEnd != null) {
     const s = Math.min(selectionStart, selectionEnd);
     const e = Math.max(selectionStart, selectionEnd);
 
-    const x1 = sampleToCanvasX(s);
-    const x2 = sampleToCanvasX(e);
+    const x1 = sampleToMainCanvasX(s);
+    const x2 = sampleToMainCanvasX(e);
 
-    ctx.fillStyle = "rgba(0, 80, 255, 0.14)";
-    ctx.fillRect(x1, 0, x2 - x1, height);
+    mainCtx.fillStyle = "rgba(0, 80, 255, 0.12)";
+    mainCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
 
-    ctx.strokeStyle = "rgba(0, 80, 255, 0.9)";
-    ctx.beginPath();
-    ctx.moveTo(x1, 0);
-    ctx.lineTo(x1, height);
-    ctx.moveTo(x2, 0);
-    ctx.lineTo(x2, height);
-    ctx.stroke();
+    // start handle
+    mainCtx.strokeStyle = "rgba(0, 80, 255, 1)";
+    mainCtx.lineWidth = 3;
+    mainCtx.beginPath();
+    mainCtx.moveTo(x1, 0);
+    mainCtx.lineTo(x1, height);
+    mainCtx.stroke();
+
+    mainCtx.fillStyle = "rgba(0, 80, 255, 1)";
+    mainCtx.fillRect(x1 - 6, 0, 12, 20);
+
+    // end handle
+    mainCtx.beginPath();
+    mainCtx.moveTo(x2, 0);
+    mainCtx.lineTo(x2, height);
+    mainCtx.stroke();
+
+    mainCtx.fillRect(x2 - 6, 0, 12, 20);
   }
 
-  if (currentPlayheadSample != null && currentPlayheadSample >= viewStart && currentPlayheadSample <= viewEnd) {
-    const x = sampleToCanvasX(currentPlayheadSample);
-    ctx.strokeStyle = "rgba(255, 0, 0, 0.95)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    ctx.stroke();
+  if (editedAudioBuffer && currentPlayheadSample != null) {
+    if (currentPlayheadSample >= viewStart && currentPlayheadSample <= viewEnd) {
+      const x = sampleToMainCanvasX(currentPlayheadSample);
+      mainCtx.strokeStyle = "rgba(255, 0, 0, 0.95)";
+      mainCtx.lineWidth = 2;
+      mainCtx.beginPath();
+      mainCtx.moveTo(x, 0);
+      mainCtx.lineTo(x, height);
+      mainCtx.stroke();
+    }
   }
 }
 
 // ------------------------------
-// Editing tools
+// Edit mode
 // ------------------------------
+function updateEditorInfo() {
+  if (editSession.startSample == null || editSession.endSample == null || !editedAudioBuffer) {
+    editorRangeInfo.textContent = "編集範囲: -";
+    return;
+  }
+
+  const s = editSession.startSample / editedAudioBuffer.sampleRate;
+  const e = editSession.endSample / editedAudioBuffer.sampleRate;
+  editorRangeInfo.textContent = `編集範囲: ${s.toFixed(2)}s ～ ${e.toFixed(2)}s`;
+}
+
+function openEditMode() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+
+  const s = Math.min(selectionStart, selectionEnd);
+  const e = Math.max(selectionStart, selectionEnd);
+
+  if (e - s < 10) {
+    alert("編集範囲が短すぎます。");
+    return;
+  }
+
+  editSession.startSample = s;
+  editSession.endSample = e;
+  editSession.snapshotBeforeEdit = cloneAudioBuffer(editedAudioBuffer);
+  editSession.historyStack = [];
+
+  isEditMode = true;
+  editorPanel.classList.remove("hidden");
+  updateEditorInfo();
+  undoBtn.disabled = true;
+  drawEditWaveform();
+  setStatus("編集モード");
+}
+
+function cancelEditMode() {
+  if (editSession.snapshotBeforeEdit) {
+    editedAudioBuffer = cloneAudioBuffer(editSession.snapshotBeforeEdit);
+  }
+
+  editSession.startSample = null;
+  editSession.endSample = null;
+  editSession.snapshotBeforeEdit = null;
+  editSession.historyStack = [];
+
+  isEditMode = false;
+  editorPanel.classList.add("hidden");
+  undoBtn.disabled = true;
+  drawMainWaveform();
+  drawEditWaveform();
+  setStatus("編集キャンセル");
+}
+
+function applyEditMode() {
+  editSession.startSample = null;
+  editSession.endSample = null;
+  editSession.snapshotBeforeEdit = null;
+  editSession.historyStack = [];
+
+  isEditMode = false;
+  editorPanel.classList.add("hidden");
+  undoBtn.disabled = true;
+  drawMainWaveform();
+  drawEditWaveform();
+  setStatus("編集確定");
+}
+
+function pushEditHistory() {
+  editSession.historyStack.push(cloneAudioBuffer(editedAudioBuffer));
+  if (editSession.historyStack.length > 20) {
+    editSession.historyStack.shift();
+  }
+  undoBtn.disabled = editSession.historyStack.length === 0;
+}
+
+function undoEditInSession() {
+  if (editSession.historyStack.length === 0) return;
+  editedAudioBuffer = editSession.historyStack.pop();
+  undoBtn.disabled = editSession.historyStack.length === 0;
+  drawEditWaveform();
+  drawMainWaveform();
+  setStatus("1段階戻しました");
+}
+
+function drawEditWaveform() {
+  if (!isEditMode || !editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) {
+    drawWaveformToCanvas(editCtx, editCanvas, null, 0, 0);
+    return;
+  }
+
+  drawWaveformToCanvas(
+    editCtx,
+    editCanvas,
+    editedAudioBuffer,
+    editSession.startSample,
+    editSession.endSample
+  );
+}
+
+function editCanvasXToSample(x) {
+  if (!editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return 0;
+  const width = editCanvas.clientWidth;
+  const ratio = clamp(x / width, 0, 1);
+  return Math.floor(editSession.startSample + ratio * (editSession.endSample - editSession.startSample));
+}
+
+function editCanvasYToAmplitude(y) {
+  const height = editCanvas.clientHeight;
+  const ratio = 1 - (y / height) * 2;
+  return clamp(ratio, -1, 1);
+}
+
 function applyDrawTool(sampleCenter, ampTarget) {
   const data = editedAudioBuffer.getChannelData(0);
   const radius = parseInt(brushSizeInput.value, 10);
   const strength = parseInt(strengthInput.value, 10) / 100;
 
-  const start = Math.max(0, sampleCenter - radius);
-  const end = Math.min(data.length - 1, sampleCenter + radius);
+  const start = Math.max(editSession.startSample, sampleCenter - radius);
+  const end = Math.min(editSession.endSample, sampleCenter + radius);
 
   for (let i = start; i <= end; i++) {
     const dist = Math.abs(i - sampleCenter) / Math.max(1, radius);
@@ -759,8 +1061,10 @@ function applySmoothTool(sampleCenter) {
   const radius = parseInt(brushSizeInput.value, 10);
   const strength = parseInt(strengthInput.value, 10) / 100;
 
-  const start = Math.max(1, sampleCenter - radius);
-  const end = Math.min(data.length - 2, sampleCenter + radius);
+  const start = Math.max(editSession.startSample + 1, sampleCenter - radius);
+  const end = Math.min(editSession.endSample - 1, sampleCenter + radius);
+
+  if (end <= start) return;
   const snapshot = new Float32Array(data.slice(start - 1, end + 2));
 
   for (let i = start; i <= end; i++) {
@@ -776,8 +1080,8 @@ function applyGainTool(sampleCenter) {
   const strength = parseInt(strengthInput.value, 10) / 100;
   const gainBase = 1 + strength * 0.8;
 
-  const start = Math.max(0, sampleCenter - radius);
-  const end = Math.min(data.length - 1, sampleCenter + radius);
+  const start = Math.max(editSession.startSample, sampleCenter - radius);
+  const end = Math.min(editSession.endSample, sampleCenter + radius);
 
   for (let i = start; i <= end; i++) {
     const dist = Math.abs(i - sampleCenter) / Math.max(1, radius);
@@ -793,8 +1097,8 @@ function applyEraseTool(sampleCenter) {
   const strength = parseInt(strengthInput.value, 10) / 100;
   const factorBase = 1 - strength * 0.9;
 
-  const start = Math.max(0, sampleCenter - radius);
-  const end = Math.min(data.length - 1, sampleCenter + radius);
+  const start = Math.max(editSession.startSample, sampleCenter - radius);
+  const end = Math.min(editSession.endSample, sampleCenter + radius);
 
   for (let i = start; i <= end; i++) {
     const dist = Math.abs(i - sampleCenter) / Math.max(1, radius);
@@ -804,12 +1108,10 @@ function applyEraseTool(sampleCenter) {
   }
 }
 
-function applyToolAtPointer(x, y) {
-  if (!editedAudioBuffer) return;
-
+function applyEditToolAt(x, y) {
+  const sample = editCanvasXToSample(x);
+  const amp = editCanvasYToAmplitude(y);
   const tool = toolSelect.value;
-  const sample = canvasXToSample(x);
-  const amp = canvasYToAmplitude(y);
 
   if (tool === "draw") {
     applyDrawTool(sample, amp);
@@ -822,26 +1124,8 @@ function applyToolAtPointer(x, y) {
   }
 }
 
-function undoEdit() {
-  if (historyStack.length === 0) return;
-  editedAudioBuffer = historyStack.pop();
-  undoBtn.disabled = historyStack.length === 0;
-  drawWaveform();
-  setStatus("1段階戻しました");
-}
-
-function resetEditedAudio() {
-  if (!originalAudioBuffer) return;
-  pushHistory();
-  editedAudioBuffer = cloneAudioBuffer(originalAudioBuffer);
-  clearSelection();
-  resetView();
-  drawWaveform();
-  setStatus("編集をリセット");
-}
-
 // ------------------------------
-// Save / load / duplicate / delete
+// Save / library
 // ------------------------------
 async function saveCurrentMaterial(asEditedCopy = false) {
   if (!originalAudioBuffer || !editedAudioBuffer) return;
@@ -856,7 +1140,7 @@ async function saveCurrentMaterial(asEditedCopy = false) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     original: audioBufferToChannelArrays(originalAudioBuffer),
-    edited: audioBufferToChannelArrays(editedAudioBuffer)
+    edited: audioBufferToChannelArrays(editedAudioBuffer),
   };
 
   await dbPutMaterial(material);
@@ -869,23 +1153,29 @@ async function loadMaterialFromDB(id) {
     const item = await dbGetMaterial(id);
     if (!item) return;
 
-    ensureAudioContext();
+    await unlockAudio();
+
     originalAudioBuffer = channelArraysToAudioBuffer(item.original);
     editedAudioBuffer = channelArraysToAudioBuffer(item.edited);
-    historyStack = [];
+
     currentMaterialName = item.name || "";
     currentMaterialSource = item.source || "";
-
     saveNameInput.value = currentMaterialName;
     fileInfoEl.textContent = `ライブラリ: ${item.name}`;
-    clearSelection();
+
     resetView();
-    enableEditingButtons(true);
-    drawWaveform();
+    resetSelectionDefault();
+    stopPlayback();
+    isEditMode = false;
+    editorPanel.classList.add("hidden");
+    editSession.historyStack = [];
+    editSession.snapshotBeforeEdit = null;
+    drawMainWaveform();
+    drawEditWaveform();
+    updateMainUIState();
     setStatus("素材を読み込みました");
   } catch (err) {
     console.error(err);
-    setStatus("素材読込失敗");
     alert("保存済み素材の読み込みに失敗しました。");
   }
 }
@@ -899,7 +1189,7 @@ async function duplicateMaterial(id) {
     id: generateId(),
     name: `${item.name}_copy`,
     createdAt: Date.now(),
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
   };
 
   await dbPutMaterial(duplicated);
@@ -953,18 +1243,15 @@ async function refreshLibrary() {
   }
 }
 
-function escapeHtml(str) {
-  return String(str)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+// ------------------------------
+// Export WAV
+// ------------------------------
+function writeString(view, offset, str) {
+  for (let i = 0; i < str.length; i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
 }
 
-// ------------------------------
-// WAV export
-// ------------------------------
 function audioBufferToWavBlob(buffer) {
   const numChannels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
@@ -997,7 +1284,7 @@ function audioBufferToWavBlob(buffer) {
 
   for (let i = 0; i < buffer.length; i++) {
     for (let ch = 0; ch < numChannels; ch++) {
-      let sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      let sample = clamp(channels[ch][i], -1, 1);
       sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
       view.setInt16(offset, sample, true);
       offset += 2;
@@ -1007,17 +1294,11 @@ function audioBufferToWavBlob(buffer) {
   return new Blob([arrayBuffer], { type: "audio/wav" });
 }
 
-function writeString(view, offset, str) {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i));
-  }
-}
-
 function exportEditedWav() {
   if (!editedAudioBuffer) return;
 
-  const wavBlob = audioBufferToWavBlob(editedAudioBuffer);
-  const url = URL.createObjectURL(wavBlob);
+  const blob = audioBufferToWavBlob(editedAudioBuffer);
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = `${(saveNameInput.value.trim() || "edited_voice")}.wav`;
@@ -1028,73 +1309,182 @@ function exportEditedWav() {
 }
 
 // ------------------------------
-// Pointer events
+// UI state
 // ------------------------------
-function getCanvasLocalPos(event) {
-  const rect = canvas.getBoundingClientRect();
-  return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top
-  };
+function updateMainUIState() {
+  const hasAudio = !!editedAudioBuffer;
+  const hasSelection = hasAudio && selectionStart != null && selectionEnd != null;
+
+  playBtn.disabled = !hasAudio;
+  pauseBtn.disabled = !hasAudio;
+  rewindBtn.disabled = !hasAudio;
+  forwardBtn.disabled = !hasAudio;
+  stopBtn.disabled = !hasAudio;
+  seekBar.disabled = !hasAudio;
+
+  scrollLeftBtn.disabled = !hasAudio;
+  scrollRightBtn.disabled = !hasAudio;
+  zoomInBtn.disabled = !hasAudio;
+  zoomOutBtn.disabled = !hasAudio;
+  fullViewBtn.disabled = !hasAudio;
+
+  playSelectionBtn.disabled = !hasSelection;
+  zoomToSelectionBtn.disabled = !hasSelection;
+  resetSelectionBtn.disabled = !hasSelection;
+  openEditorBtn.disabled = !hasSelection;
+
+  saveCurrentBtn.disabled = !hasAudio;
+  saveEditedAsBtn.disabled = !hasAudio;
+  saveWavBtn.disabled = !hasAudio;
+
+  if (!hasAudio) {
+    seekBar.value = 0;
+    currentTimeLabel.textContent = "0.00s";
+    durationLabel.textContent = "0.00s";
+    playbackModeInfoEl.textContent = "再生対象: なし";
+    playbackTimeInfoEl.textContent = "再生位置: -";
+  } else {
+    seekBar.max = 1;
+    updatePlayerUI();
+  }
 }
 
-canvas.addEventListener("pointerdown", (event) => {
-  if (!editedAudioBuffer) return;
+// ------------------------------
+// Main canvas selection handles
+// ------------------------------
+mainCanvas.addEventListener("pointerdown", async (event) => {
+  if (!editedAudioBuffer || isEditMode) return;
 
-  canvas.setPointerCapture(event.pointerId);
-  isPointerDown = true;
+  await unlockAudio();
 
-  const { x, y } = getCanvasLocalPos(event);
-  lastPointerX = x;
-  lastPointerY = y;
+  const { x } = getMainCanvasLocalPos(event);
 
-  if (toolSelect.value === "select") {
-    selectionStart = canvasXToSample(x);
-    selectionEnd = selectionStart;
-    updateSelectionInfo();
-    drawWaveform();
+  const sx = selectionStart != null ? sampleToMainCanvasX(selectionStart) : null;
+  const ex = selectionEnd != null ? sampleToMainCanvasX(selectionEnd) : null;
+
+  if (sx != null && Math.abs(x - sx) <= selectionHandleThresholdPx) {
+    draggingSelectionHandle = "start";
+    mainCanvas.setPointerCapture(event.pointerId);
     return;
   }
 
-  pushHistory();
-  applyToolAtPointer(x, y);
-  drawWaveform();
-});
-
-canvas.addEventListener("pointermove", (event) => {
-  if (!editedAudioBuffer || !isPointerDown) return;
-
-  const { x, y } = getCanvasLocalPos(event);
-
-  if (toolSelect.value === "select") {
-    selectionEnd = canvasXToSample(x);
-    updateSelectionInfo();
-    drawWaveform();
+  if (ex != null && Math.abs(x - ex) <= selectionHandleThresholdPx) {
+    draggingSelectionHandle = "end";
+    mainCanvas.setPointerCapture(event.pointerId);
     return;
   }
 
-  const steps = 8;
-  for (let i = 1; i <= steps; i++) {
-    const ix = lastPointerX + (x - lastPointerX) * (i / steps);
-    const iy = lastPointerY + (y - lastPointerY) * (i / steps);
-    applyToolAtPointer(ix, iy);
+  // tap waveform -> seek
+  const sample = mainCanvasXToSample(x);
+  const sec = sample / editedAudioBuffer.sampleRate;
+  seekTo(sec);
+});
+
+mainCanvas.addEventListener("pointermove", (event) => {
+  if (!editedAudioBuffer || !draggingSelectionHandle) return;
+
+  const { x } = getMainCanvasLocalPos(event);
+  const sample = mainCanvasXToSample(x);
+
+  if (draggingSelectionHandle === "start") {
+    selectionStart = clamp(sample, 0, editedAudioBuffer.length);
+    if (selectionEnd != null && selectionStart > selectionEnd) {
+      const tmp = selectionStart;
+      selectionStart = selectionEnd;
+      selectionEnd = tmp;
+      draggingSelectionHandle = "end";
+    }
+  } else if (draggingSelectionHandle === "end") {
+    selectionEnd = clamp(sample, 0, editedAudioBuffer.length);
+    if (selectionStart != null && selectionEnd < selectionStart) {
+      const tmp = selectionEnd;
+      selectionEnd = selectionStart;
+      selectionStart = tmp;
+      draggingSelectionHandle = "start";
+    }
   }
 
-  lastPointerX = x;
-  lastPointerY = y;
-  drawWaveform();
+  updateSelectionInfo();
+  drawMainWaveform();
 });
 
-canvas.addEventListener("pointerup", () => {
-  isPointerDown = false;
+mainCanvas.addEventListener("pointerup", () => {
+  draggingSelectionHandle = null;
 });
 
-canvas.addEventListener("pointercancel", () => {
-  isPointerDown = false;
+mainCanvas.addEventListener("pointercancel", () => {
+  draggingSelectionHandle = null;
 });
 
 // ------------------------------
-// Events
+// Edit canvas events
+// ------------------------------
+editCanvas.addEventListener("pointerdown", async (event) => {
+  if (!isEditMode || !editedAudioBuffer) return;
+
+  await unlockAudio();
+
+  const { x, y } = getEditCanvasLocalPos(event);
+  isEditPointerDown = true;
+  editLastX = x;
+  editLastY = y;
+  editCanvas.setPointerCapture(event.pointerId);
+
+  pushEditHistory();
+  applyEditToolAt(x, y);
+  drawEditWaveform();
+  drawMainWaveform();
+});
+
+editCanvas.addEventListener("pointermove", (event) => {
+  if (!isEditMode || !isEditPointerDown || !editedAudioBuffer) return;
+
+  const { x, y } = getEditCanvasLocalPos(event);
+  const steps = 8;
+
+  for (let i = 1; i <= steps; i++) {
+    const ix = editLastX + (x - editLastX) * (i / steps);
+    const iy = editLastY + (y - editLastY) * (i / steps);
+    applyEditToolAt(ix, iy);
+  }
+
+  editLastX = x;
+  editLastY = y;
+
+  drawEditWaveform();
+  drawMainWaveform();
+});
+
+editCanvas.addEventListener("pointerup", () => {
+  isEditPointerDown = false;
+});
+
+editCanvas.addEventListener("pointercancel", () => {
+  isEditPointerDown = false;
+});
+
+// ------------------------------
+// Seek bar
+// ------------------------------
+seekBar.addEventListener("input", () => {
+  if (!editedAudioBuffer) return;
+  isSeeking = true;
+  const sec = parseFloat(seekBar.value) * editedAudioBuffer.duration;
+  currentTimeLabel.textContent = formatSec(sec);
+  playbackTimeInfoEl.textContent = `再生位置: ${formatSec(sec)}`;
+  currentPlayheadSample = Math.floor(sec * editedAudioBuffer.sampleRate);
+  drawMainWaveform();
+});
+
+seekBar.addEventListener("change", () => {
+  if (!editedAudioBuffer) return;
+  const sec = parseFloat(seekBar.value) * editedAudioBuffer.duration;
+  isSeeking = false;
+  seekTo(sec);
+});
+
+// ------------------------------
+// Buttons
 // ------------------------------
 recordBtn.addEventListener("click", async () => {
   if (!mediaRecorder || mediaRecorder.state === "inactive") {
@@ -1122,28 +1512,28 @@ anyFileInput.addEventListener("change", async (event) => {
   anyFileInput.value = "";
 });
 
-playOriginalBtn.addEventListener("click", () => {
-  if (!originalAudioBuffer) return;
-  playAudioBuffer(originalAudioBuffer, 0, originalAudioBuffer.duration, "元音声 全体");
+playBtn.addEventListener("click", async () => {
+  await playCurrent();
 });
 
-playEditedBtn.addEventListener("click", () => {
-  if (!editedAudioBuffer) return;
-  playAudioBuffer(editedAudioBuffer, 0, editedAudioBuffer.duration, "編集後 全体");
-});
-
-playSelectionBtn.addEventListener("click", () => {
-  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
-
-  const s = Math.min(selectionStart, selectionEnd);
-  const e = Math.max(selectionStart, selectionEnd);
-  const sr = editedAudioBuffer.sampleRate;
-
-  playAudioBuffer(editedAudioBuffer, s / sr, e / sr, "選択範囲");
+pauseBtn.addEventListener("click", () => {
+  pausePlayback();
 });
 
 stopBtn.addEventListener("click", () => {
-  stopCurrentPlayback();
+  stopPlayback(false);
+});
+
+rewindBtn.addEventListener("click", () => {
+  skipBy(-10);
+});
+
+forwardBtn.addEventListener("click", () => {
+  skipBy(10);
+});
+
+playSelectionBtn.addEventListener("click", async () => {
+  await playSelection();
 });
 
 scrollLeftBtn.addEventListener("click", () => {
@@ -1162,21 +1552,34 @@ zoomOutBtn.addEventListener("click", () => {
   zoomView(2.0);
 });
 
+fullViewBtn.addEventListener("click", () => {
+  resetView();
+  drawMainWaveform();
+});
+
 zoomToSelectionBtn.addEventListener("click", () => {
   zoomToSelection();
 });
 
-fullViewBtn.addEventListener("click", () => {
-  resetView();
-  drawWaveform();
+resetSelectionBtn.addEventListener("click", () => {
+  resetSelectionDefault();
+  drawMainWaveform();
+});
+
+openEditorBtn.addEventListener("click", () => {
+  openEditMode();
 });
 
 undoBtn.addEventListener("click", () => {
-  undoEdit();
+  undoEditInSession();
 });
 
-resetBtn.addEventListener("click", () => {
-  resetEditedAudio();
+cancelEditBtn.addEventListener("click", () => {
+  cancelEditMode();
+});
+
+applyEditBtn.addEventListener("click", () => {
+  applyEditMode();
 });
 
 saveWavBtn.addEventListener("click", () => {
@@ -1225,5 +1628,11 @@ libraryList.addEventListener("click", async (event) => {
 // ------------------------------
 // Init
 // ------------------------------
-drawWaveform();
-refreshLibrary();
+function init() {
+  updateMainUIState();
+  drawMainWaveform();
+  drawEditWaveform();
+  refreshLibrary();
+}
+
+init();
