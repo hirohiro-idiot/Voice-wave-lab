@@ -1,5 +1,5 @@
 // =====================================================
-// Wave Voice Lab v3
+// Wave Voice Lab v3.1
 // =====================================================
 
 // ------------------------------
@@ -14,6 +14,9 @@ const playbackModeInfoEl = document.getElementById("playbackModeInfo");
 const playbackTimeInfoEl = document.getElementById("playbackTimeInfo");
 
 const recordBtn = document.getElementById("recordBtn");
+const openAudioPickerBtn = document.getElementById("openAudioPickerBtn");
+const openVideoPickerBtn = document.getElementById("openVideoPickerBtn");
+const openAnyPickerBtn = document.getElementById("openAnyPickerBtn");
 const audioInput = document.getElementById("audioInput");
 const videoInput = document.getElementById("videoInput");
 const anyFileInput = document.getElementById("anyFileInput");
@@ -127,7 +130,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v3";
+const DB_NAME = "wave_voice_lab_db_v31";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -892,9 +895,9 @@ function drawMainWaveform() {
     mainCtx.fillStyle = "rgba(0, 80, 255, 0.12)";
     mainCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
 
-    // start handle
     mainCtx.strokeStyle = "rgba(0, 80, 255, 1)";
     mainCtx.lineWidth = 3;
+
     mainCtx.beginPath();
     mainCtx.moveTo(x1, 0);
     mainCtx.lineTo(x1, height);
@@ -903,7 +906,6 @@ function drawMainWaveform() {
     mainCtx.fillStyle = "rgba(0, 80, 255, 1)";
     mainCtx.fillRect(x1 - 6, 0, 12, 20);
 
-    // end handle
     mainCtx.beginPath();
     mainCtx.moveTo(x2, 0);
     mainCtx.lineTo(x2, height);
@@ -1374,7 +1376,6 @@ mainCanvas.addEventListener("pointerdown", async (event) => {
     return;
   }
 
-  // tap waveform -> seek
   const sample = mainCanvasXToSample(x);
   const sec = sample / editedAudioBuffer.sampleRate;
   seekTo(sec);
@@ -1486,6 +1487,18 @@ seekBar.addEventListener("change", () => {
 // ------------------------------
 // Buttons
 // ------------------------------
+openAudioPickerBtn.addEventListener("click", () => {
+  audioInput.click();
+});
+
+openVideoPickerBtn.addEventListener("click", () => {
+  videoInput.click();
+});
+
+openAnyPickerBtn.addEventListener("click", () => {
+  anyFileInput.click();
+});
+
 recordBtn.addEventListener("click", async () => {
   if (!mediaRecorder || mediaRecorder.state === "inactive") {
     await startRecording();
