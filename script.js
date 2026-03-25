@@ -1,5 +1,5 @@
 // =====================================================
-// Wave Voice Lab v4
+// Wave Voice Lab v4.1
 // 音声専用 / ループ / 速度変更 / タッチズーム対応
 // =====================================================
 
@@ -15,7 +15,6 @@ const playbackModeInfoEl = document.getElementById("playbackModeInfo");
 const playbackTimeInfoEl = document.getElementById("playbackTimeInfo");
 
 const recordBtn = document.getElementById("recordBtn");
-const openAudioPickerBtn = document.getElementById("openAudioPickerBtn");
 const audioInput = document.getElementById("audioInput");
 
 const saveNameInput = document.getElementById("saveNameInput");
@@ -117,12 +116,12 @@ const selectionHandleThresholdPx = 20;
 
 // gesture state for main canvas
 let mainPointerState = new Map();
-let panStartViewStart = 0;
-let panStartViewEnd = 0;
-let panLastCenterX = 0;
 let pinchStartDistance = 0;
 let pinchStartViewStart = 0;
 let pinchStartViewEnd = 0;
+let panLastCenterX = 0;
+let lastTapTime = 0;
+let lastTapX = 0;
 
 // ------------------------------
 // Edit mode state
@@ -146,7 +145,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v4";
+const DB_NAME = "wave_voice_lab_db_v41";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -632,7 +631,7 @@ function stopCurrentSourceOnly() {
   if (currentSourceNode) {
     try {
       currentSourceNode.stop();
-    } catch (e) {}
+    } catch (_) {}
   }
   currentSourceNode = null;
   currentGainNode = null;
@@ -1463,8 +1462,6 @@ mainCanvas.addEventListener("pointerdown", async (event) => {
       return;
     }
 
-    panStartViewStart = viewStart;
-    panStartViewEnd = viewEnd;
     panLastCenterX = x;
   }
 
@@ -1473,7 +1470,6 @@ mainCanvas.addEventListener("pointerdown", async (event) => {
     pinchStartDistance = distanceBetweenTouches(pointers);
     pinchStartViewStart = viewStart;
     pinchStartViewEnd = viewEnd;
-    panLastCenterX = centerBetweenTouches(pointers);
   }
 });
 
@@ -1515,6 +1511,8 @@ mainCanvas.addEventListener("pointermove", (event) => {
     const currentX = pointers[0].x;
     const dx = currentX - panLastCenterX;
     panLastCenterX = currentX;
+
+    if (Math.abs(dx) < 1) return;
 
     const samplesPerPx = (viewEnd - viewStart) / Math.max(1, mainCanvas.clientWidth);
     const shiftSamples = Math.round(-dx * samplesPerPx);
@@ -1573,10 +1571,27 @@ mainCanvas.addEventListener("pointermove", (event) => {
 });
 
 mainCanvas.addEventListener("pointerup", (event) => {
+  const now = performance.now();
+  const pos = mainPointerState.get(event.pointerId);
   mainPointerState.delete(event.pointerId);
+
   if (mainPointerState.size === 0) {
     draggingSelectionHandle = null;
   }
+
+  if (!editedAudioBuffer || isEditMode || !pos) return;
+
+  const movedOnHandle = draggingSelectionHandle !== null;
+  if (movedOnHandle) return;
+
+  if (now - lastTapTime < 300 && Math.abs(pos.x - lastTapX) < 20) {
+    const sample = mainCanvasXToSample(pos.x);
+    const sec = sample / editedAudioBuffer.sampleRate;
+    seekTo(sec);
+  }
+
+  lastTapTime = now;
+  lastTapX = pos.x;
 });
 
 mainCanvas.addEventListener("pointercancel", (event) => {
@@ -1584,25 +1599,6 @@ mainCanvas.addEventListener("pointercancel", (event) => {
   if (mainPointerState.size === 0) {
     draggingSelectionHandle = null;
   }
-});
-
-// tap to seek after click-like action
-mainCanvas.addEventListener("click", (event) => {
-  if (!editedAudioBuffer || isEditMode) return;
-  if (draggingSelectionHandle) return;
-
-  const pos = getMainCanvasLocalPos(event);
-  const sx = selectionStart != null ? sampleToMainCanvasX(selectionStart) : null;
-  const ex = selectionEnd != null ? sampleToMainCanvasX(selectionEnd) : null;
-
-  if ((sx != null && Math.abs(pos.x - sx) <= selectionHandleThresholdPx) ||
-      (ex != null && Math.abs(pos.x - ex) <= selectionHandleThresholdPx)) {
-    return;
-  }
-
-  const sample = mainCanvasXToSample(pos.x);
-  const sec = sample / editedAudioBuffer.sampleRate;
-  seekTo(sec);
 });
 
 // ------------------------------
@@ -1676,10 +1672,6 @@ seekBar.addEventListener("change", () => {
 // ------------------------------
 // Buttons
 // ------------------------------
-openAudioPickerBtn.addEventListener("click", () => {
-  audioInput.click();
-});
-
 recordBtn.addEventListener("click", async () => {
   if (!mediaRecorder || mediaRecorder.state === "inactive") {
     await startRecording();
