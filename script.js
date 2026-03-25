@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.3
-// 音声専用 / ループ修正 / 選択範囲内再生 / 速度変更 / タッチズーム対応
+// Wave Voice Lab v4.4
+// 音声専用 / 高拡大 / 選択範囲保存 / ループ / 選択範囲内再生対応
 // =====================================================
 
 // ------------------------------
@@ -38,6 +38,7 @@ const speedLabel = document.getElementById("speedLabel");
 
 const playSelectionBtn = document.getElementById("playSelectionBtn");
 const zoomToSelectionBtn = document.getElementById("zoomToSelectionBtn");
+const saveSelectionWavBtn = document.getElementById("saveSelectionWavBtn");
 const resetSelectionBtn = document.getElementById("resetSelectionBtn");
 const openEditorBtn = document.getElementById("openEditorBtn");
 
@@ -90,8 +91,8 @@ let currentMaterialSource = "";
 
 let playerState = {
   isPlaying: false,
-  mode: "none",      // full / selection / edit
-  lastMode: "full",  // full / selection / edit
+  mode: "none",
+  lastMode: "full",
   playStartSec: 0,
   playEndSec: 0,
   pausedAtSec: 0,
@@ -146,7 +147,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v43";
+const DB_NAME = "wave_voice_lab_db_v44";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -620,10 +621,6 @@ async function startPlaybackFrom(positionSec, mode = "full") {
   let startSec = clamp(positionSec, rangeStart, rangeEnd);
   let endSec = rangeEnd;
 
-  let modeLabel = "全体";
-  if (mode === "selection") modeLabel = "選択範囲";
-  if (mode === "edit") modeLabel = "編集範囲";
-
   if (endSec <= startSec) {
     setStatus("再生範囲が不正です");
     return;
@@ -816,10 +813,10 @@ function updateViewInfo() {
   }
 
   const total = editedAudioBuffer.length;
-  const startRatio = ((viewStart / total) * 100).toFixed(1);
-  const endRatio = ((viewEnd / total) * 100).toFixed(1);
-  const startSec = (viewStart / editedAudioBuffer.sampleRate).toFixed(2);
-  const endSec = (viewEnd / editedAudioBuffer.sampleRate).toFixed(2);
+  const startRatio = ((viewStart / total) * 100).toFixed(3);
+  const endRatio = ((viewEnd / total) * 100).toFixed(3);
+  const startSec = (viewStart / editedAudioBuffer.sampleRate).toFixed(4);
+  const endSec = (viewEnd / editedAudioBuffer.sampleRate).toFixed(4);
   viewInfoEl.textContent = `表示範囲: ${startRatio}% ～ ${endRatio}% (${startSec}s ～ ${endSec}s)`;
 }
 
@@ -832,9 +829,10 @@ function updateSelectionInfo() {
 
   const s = Math.min(selectionStart, selectionEnd);
   const e = Math.max(selectionStart, selectionEnd);
+  const lenSec = (e - s) / editedAudioBuffer.sampleRate;
 
   selectionInfoEl.textContent =
-    `選択範囲: ${(s / editedAudioBuffer.sampleRate).toFixed(2)}s ～ ${(e / editedAudioBuffer.sampleRate).toFixed(2)}s`;
+    `選択範囲: ${(s / editedAudioBuffer.sampleRate).toFixed(4)}s ～ ${(e / editedAudioBuffer.sampleRate).toFixed(4)}s / 長さ ${lenSec.toFixed(4)}s`;
 
   updateMainUIState();
 }
@@ -872,7 +870,7 @@ function zoomView(factor, centerSample = null) {
   const center = centerSample == null ? viewStart + currentLength / 2 : centerSample;
   let newLength = Math.floor(currentLength * factor);
 
-  const minLength = 500;
+  const minLength = 250;
   const maxLength = editedAudioBuffer.length;
   newLength = clamp(newLength, minLength, maxLength);
 
@@ -1064,7 +1062,7 @@ function updateEditorInfo() {
 
   const s = editSession.startSample / editedAudioBuffer.sampleRate;
   const e = editSession.endSample / editedAudioBuffer.sampleRate;
-  editorRangeInfo.textContent = `編集範囲: ${s.toFixed(2)}s ～ ${e.toFixed(2)}s`;
+  editorRangeInfo.textContent = `編集範囲: ${s.toFixed(4)}s ～ ${e.toFixed(4)}s`;
 }
 
 function openEditMode() {
@@ -1273,6 +1271,33 @@ function applyEditToolAt(x, y) {
 }
 
 // ------------------------------
+// Selection export
+// ------------------------------
+function createSelectionAudioBuffer() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return null;
+
+  const startSample = Math.min(selectionStart, selectionEnd);
+  const endSample = Math.max(selectionStart, selectionEnd);
+  const length = endSample - startSample;
+
+  if (length <= 0) return null;
+
+  const slicedBuffer = audioContext.createBuffer(
+    editedAudioBuffer.numberOfChannels,
+    length,
+    editedAudioBuffer.sampleRate
+  );
+
+  for (let ch = 0; ch < editedAudioBuffer.numberOfChannels; ch++) {
+    const sourceData = editedAudioBuffer.getChannelData(ch);
+    const targetData = slicedBuffer.getChannelData(ch);
+    targetData.set(sourceData.slice(startSample, endSample));
+  }
+
+  return slicedBuffer;
+}
+
+// ------------------------------
 // Save / library
 // ------------------------------
 async function saveCurrentMaterial(asEditedCopy = false) {
@@ -1456,6 +1481,30 @@ function exportEditedWav() {
   setStatus("WAVを書き出しました");
 }
 
+function exportSelectionWav() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+
+  const selectionBuffer = createSelectionAudioBuffer();
+  if (!selectionBuffer) {
+    alert("選択範囲が正しくありません。");
+    return;
+  }
+
+  const blob = audioBufferToWavBlob(selectionBuffer);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+
+  const startSec = (Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate).toFixed(4);
+  const endSec = (Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate).toFixed(4);
+
+  a.href = url;
+  a.download = `${(saveNameInput.value.trim() || "selection")}_${startSec}s-${endSec}s.wav`;
+  a.click();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("選択範囲を書き出しました");
+}
+
 // ------------------------------
 // UI state
 // ------------------------------
@@ -1480,6 +1529,7 @@ function updateMainUIState() {
 
   playSelectionBtn.disabled = !hasSelection;
   zoomToSelectionBtn.disabled = !hasSelection;
+  saveSelectionWavBtn.disabled = !hasSelection;
   resetSelectionBtn.disabled = !hasSelection;
   openEditorBtn.disabled = !hasSelection;
 
@@ -1620,7 +1670,7 @@ mainCanvas.addEventListener("pointermove", (event) => {
     if (pinchStartDistance > 0 && dist > 0) {
       const startLen = pinchStartViewEnd - pinchStartViewStart;
       let newLen = Math.floor(startLen * (pinchStartDistance / dist));
-      newLen = clamp(newLen, 500, editedAudioBuffer.length);
+      newLen = clamp(newLen, 250, editedAudioBuffer.length);
 
       const centerRatio = clamp(centerX / Math.max(1, mainCanvas.clientWidth), 0, 1);
       const anchorSample = Math.floor(pinchStartViewStart + centerRatio * startLen);
@@ -1785,6 +1835,10 @@ editLoopToggleBtn.addEventListener("click", () => {
 
 playSelectionBtn.addEventListener("click", async () => {
   await playSelection();
+});
+
+saveSelectionWavBtn.addEventListener("click", () => {
+  exportSelectionWav();
 });
 
 editPlayBtn.addEventListener("click", async () => {
