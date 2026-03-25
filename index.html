@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wave Voice Lab v3.1</title>
+  <title>Wave Voice Lab v4</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <h1>Wave Voice Lab v3.1</h1>
-      <p class="subtitle">再生と編集を分離した音声編集ワークベンチ</p>
+      <h1>Wave Voice Lab v4</h1>
+      <p class="subtitle">音声専用・ループ・速度変更・タッチズーム対応</p>
     </header>
 
     <main class="main">
@@ -24,12 +24,7 @@
 
         <div class="row">
           <button id="recordBtn">録音開始</button>
-        </div>
-
-        <div class="row">
           <button id="openAudioPickerBtn">音声ファイルを選択</button>
-          <button id="openVideoPickerBtn">動画ファイルを選択</button>
-          <button id="openAnyPickerBtn">なんでも選択</button>
         </div>
 
         <input
@@ -37,19 +32,6 @@
           class="hidden-file-input"
           type="file"
           accept=".wav,.mp3,.m4a,.aac,.ogg,.oga,.flac,.aif,.aiff,audio/*"
-        />
-
-        <input
-          id="videoInput"
-          class="hidden-file-input"
-          type="file"
-          accept=".mp4,.mov,.m4v,.webm,.ogv,video/*"
-        />
-
-        <input
-          id="anyFileInput"
-          class="hidden-file-input"
-          type="file"
         />
 
         <div class="row">
@@ -79,6 +61,13 @@
           <button id="pauseBtn" disabled>一時停止</button>
           <button id="forwardBtn" disabled>+10秒</button>
           <button id="stopBtn" disabled>停止</button>
+        </div>
+
+        <div class="row controls-row">
+          <button id="loopToggleBtn" disabled>ループ: OFF</button>
+          <label class="inline-label" for="speedSlider">速度</label>
+          <input id="speedSlider" type="range" min="0.25" max="1.5" step="0.05" value="1.0" disabled />
+          <span id="speedLabel">1.00x</span>
         </div>
 
         <div class="seek-wrap">
@@ -121,7 +110,8 @@
         </div>
 
         <p class="hint">
-          青い縦バーが編集始点と終点です。バーをドラッグして範囲を調整してください。通常時は波形を触っても編集されません。
+          青い縦バーが編集始点と終点です。バーをドラッグして範囲を調整できます。<br>
+          1本指ドラッグで横スクロール、2本指ピンチで拡大縮小できます。
         </p>
       </section>
 
@@ -135,6 +125,13 @@
 
         <div class="canvas-wrap editor-canvas-wrap">
           <canvas id="editWaveCanvas"></canvas>
+        </div>
+
+        <div class="row controls-row">
+          <button id="editPlayBtn">範囲再生</button>
+          <button id="editPauseBtn">一時停止</button>
+          <button id="editStopBtn">停止</button>
+          <button id="editLoopToggleBtn">ループ: OFF</button>
         </div>
 
         <div class="editor-row">
@@ -165,13 +162,6 @@
           <button id="applyEditBtn">編集確定</button>
           <button id="saveWavBtn" disabled>WAV保存</button>
         </div>
-      </section>
-
-      <section class="panel help-panel">
-        <h2>使い方</h2>
-        <p>
-          まず録音またはファイル読込をします。通常画面では再生・シーク・範囲選択だけを行います。青い始点・終点バーを動かして範囲を決め、「選択範囲を編集」を押すと編集モードに入ります。編集モードではその範囲だけ拡大表示され、タッチ編集できます。
-        </p>
       </section>
     </main>
   </div>
