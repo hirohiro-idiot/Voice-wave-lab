@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.8
-// 音声専用 / 精密表示 / 元波形オーバーレイ / 連続区間・瞬時イベント解析
+// Wave Voice Lab v4.9
+// 音声専用 / 精密表示 / 元波形オーバーレイ / 周期単位抽出
 // =====================================================
 
 // ------------------------------
@@ -77,10 +77,15 @@ const editFullViewBtn = document.getElementById("editFullViewBtn");
 const precisionToggleBtn = document.getElementById("precisionToggleBtn");
 const overlayModeBtn = document.getElementById("overlayModeBtn");
 
+const unitInfoText = document.getElementById("unitInfoText");
+const playUnitBtn = document.getElementById("playUnitBtn");
+
 const mainCanvas = document.getElementById("mainWaveCanvas");
 const mainCtx = mainCanvas.getContext("2d");
 const editCanvas = document.getElementById("editWaveCanvas");
 const editCtx = editCanvas.getContext("2d");
+const unitWaveCanvas = document.getElementById("unitWaveCanvas");
+const unitWaveCtx = unitWaveCanvas.getContext("2d");
 
 // ------------------------------
 // Audio state
@@ -141,8 +146,9 @@ let lastTapX = 0;
 // Analysis state
 // ------------------------------
 let analysisState = {
-  continuousRegions: [],
-  transientEvents: [],
+  continuousRegions: [],   // [{startSample, endSample}]
+  transientEvents: [],     // [{sample}]
+  selectedUnit: null,      // {type, startSample, endSample, centerSample, ...}
 };
 
 // ------------------------------
@@ -179,7 +185,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v48";
+const DB_NAME = "wave_voice_lab_db_v49";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -372,8 +378,10 @@ function resizeCanvas(canvas, ctx) {
 function resizeAllCanvases() {
   resizeCanvas(mainCanvas, mainCtx);
   resizeCanvas(editCanvas, editCtx);
+  resizeCanvas(unitWaveCanvas, unitWaveCtx);
   drawMainWaveform();
   drawEditWaveform();
+  drawUnitWaveform();
 }
 
 window.addEventListener("resize", resizeAllCanvases);
@@ -488,16 +496,106 @@ function computeAutocorrPeak(data, start, end, minLag, maxLag) {
   return best;
 }
 
+function estimateLocalPeriodSamples(centerSample) {
+  if (!editedAudioBuffer) return null;
+
+  const data = editedAudioBuffer.getChannelData(0);
+  const sr = editedAudioBuffer.sampleRate;
+
+  const minLag = Math.max(1, Math.floor(sr / 400));
+  const maxLag = Math.max(minLag + 1, Math.floor(sr / 70));
+  const win = Math.max(maxLag * 4, Math.floor(sr * 0.04));
+
+  const start = Math.max(0, centerSample - Math.floor(win / 2));
+  const end = Math.min(data.length, centerSample + Math.floor(win / 2));
+
+  let bestLag = null;
+  let bestCorr = -Infinity;
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let sum = 0;
+    let normA = 0;
+    let normB = 0;
+
+    for (let i = start; i < end - lag; i++) {
+      const a = data[i];
+      const b = data[i + lag];
+      sum += a * b;
+      normA += a * a;
+      normB += b * b;
+    }
+
+    const denom = Math.sqrt(normA * normB) || 1e-9;
+    const corr = sum / denom;
+
+    if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLag = lag;
+    }
+  }
+
+  if (bestCorr < 0.2) return null;
+  return bestLag;
+}
+
+function findNearestUpwardZeroCrossing(data, target, searchRadius) {
+  const start = Math.max(1, target - searchRadius);
+  const end = Math.min(data.length - 1, target + searchRadius);
+
+  let bestIndex = null;
+  let bestDist = Infinity;
+
+  for (let i = start; i <= end; i++) {
+    if (data[i - 1] <= 0 && data[i] > 0) {
+      const dist = Math.abs(i - target);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIndex = i;
+      }
+    }
+  }
+
+  return bestIndex;
+}
+
+function findNextUpwardZeroCrossing(data, startIndex, minStep, maxStep) {
+  const start = Math.max(1, startIndex + minStep);
+  const end = Math.min(data.length - 1, startIndex + maxStep);
+
+  for (let i = start; i <= end; i++) {
+    if (data[i - 1] <= 0 && data[i] > 0) {
+      return i;
+    }
+  }
+
+  return null;
+}
+
+function findPrevUpwardZeroCrossing(data, startIndex, minStep, maxStep) {
+  const start = Math.max(1, startIndex - maxStep);
+  const end = Math.max(1, startIndex - minStep);
+
+  for (let i = end; i >= start; i--) {
+    if (data[i - 1] <= 0 && data[i] > 0) {
+      return i;
+    }
+  }
+
+  return null;
+}
+
 function analyzeSelectedRegion() {
-  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+  if (!editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
 
   const data = editedAudioBuffer.getChannelData(0);
   const sampleRate = editedAudioBuffer.sampleRate;
-  const startSample = Math.min(selectionStart, selectionEnd);
-  const endSample = Math.max(selectionStart, selectionEnd);
+  const startSample = editSession.startSample;
+  const endSample = editSession.endSample;
 
   analysisState.continuousRegions = [];
   analysisState.transientEvents = [];
+  analysisState.selectedUnit = null;
+  unitInfoText.textContent = "単位波形: なし";
 
   const winSize = Math.max(32, Math.floor(sampleRate * 0.02));
   const hopSize = Math.max(16, Math.floor(sampleRate * 0.01));
@@ -524,7 +622,8 @@ function analyzeSelectedRegion() {
 
   if (!frames.length) {
     updateAnalysisButtons();
-    drawMainWaveform();
+    drawEditWaveform();
+    drawUnitWaveform();
     return;
   }
 
@@ -572,15 +671,107 @@ function analyzeSelectedRegion() {
   }
 
   updateAnalysisButtons();
-  drawMainWaveform();
-  setStatus("選択範囲を解析しました");
+  drawEditWaveform();
+  drawUnitWaveform();
+  setStatus("この編集範囲を解析しました");
+}
+
+function selectContinuousUnitAt(sample) {
+  if (!editedAudioBuffer) return;
+
+  const data = editedAudioBuffer.getChannelData(0);
+  const sr = editedAudioBuffer.sampleRate;
+
+  const period = estimateLocalPeriodSamples(sample);
+  if (!period) {
+    unitInfoText.textContent = "単位波形: 周期推定に失敗";
+    analysisState.selectedUnit = null;
+    drawUnitWaveform();
+    return;
+  }
+
+  const anchor = findNearestUpwardZeroCrossing(data, sample, Math.max(8, Math.floor(period * 0.6)));
+  if (anchor == null) {
+    unitInfoText.textContent = "単位波形: 周期境界が見つかりません";
+    analysisState.selectedUnit = null;
+    drawUnitWaveform();
+    return;
+  }
+
+  const prev = findPrevUpwardZeroCrossing(
+    data,
+    anchor,
+    Math.max(1, Math.floor(period * 0.5)),
+    Math.max(2, Math.floor(period * 1.5))
+  );
+
+  const next = findNextUpwardZeroCrossing(
+    data,
+    anchor,
+    Math.max(1, Math.floor(period * 0.5)),
+    Math.max(2, Math.floor(period * 1.5))
+  );
+
+  let start = anchor;
+  let end = next;
+
+  if (next == null && prev != null) {
+    start = prev;
+    end = anchor;
+  }
+
+  if (end == null || end <= start) {
+    unitInfoText.textContent = "単位波形: 1周期の切り出しに失敗";
+    analysisState.selectedUnit = null;
+    drawUnitWaveform();
+    return;
+  }
+
+  analysisState.selectedUnit = {
+    type: "continuous",
+    startSample: start,
+    endSample: end,
+    centerSample: sample,
+    periodSamples: end - start,
+    anchorSample: anchor,
+  };
+
+  const sec = (end - start) / sr;
+  unitInfoText.textContent =
+    `単位波形: 連続区間 / 1周期 ≒ ${sec.toFixed(5)}s (${end - start} samples)`;
+
+  drawUnitWaveform();
+}
+
+function selectTransientUnitAt(sample) {
+  if (!editedAudioBuffer) return;
+
+  const sr = editedAudioBuffer.sampleRate;
+  const half = Math.floor(sr * 0.02);
+  const start = Math.max(0, sample - half);
+  const end = Math.min(editedAudioBuffer.length - 1, sample + half);
+
+  analysisState.selectedUnit = {
+    type: "transient",
+    startSample: start,
+    endSample: end,
+    centerSample: sample,
+  };
+
+  const sec = (end - start) / sr;
+  unitInfoText.textContent = `単位波形: 瞬時区間 / 長さ ≒ ${sec.toFixed(5)}s`;
+  drawUnitWaveform();
 }
 
 function clearAnalysis() {
   analysisState.continuousRegions = [];
   analysisState.transientEvents = [];
+  analysisState.selectedUnit = null;
+  unitInfoText.textContent = "単位波形: なし";
   updateAnalysisButtons();
   drawMainWaveform();
+  drawEditWaveform();
+  drawUnitWaveform();
   setStatus("解析表示を消しました");
 }
 
@@ -592,6 +783,7 @@ function updateAnalysisButtons() {
   playContinuousBtn.disabled = !hasContinuous;
   playTransientBtn.disabled = !hasTransient;
   clearAnalysisBtn.disabled = !hasAny;
+  playUnitBtn.disabled = !analysisState.selectedUnit;
 }
 
 // ------------------------------
@@ -992,6 +1184,18 @@ async function playTransientEvents() {
   setStatus("瞬時イベントを再生中");
 }
 
+async function playSelectedUnit() {
+  if (!editedAudioBuffer || !analysisState.selectedUnit) return;
+
+  const startSec = analysisState.selectedUnit.startSample / editedAudioBuffer.sampleRate;
+  const endSec = analysisState.selectedUnit.endSample / editedAudioBuffer.sampleRate;
+
+  playerState.lastMode = "full";
+  await startPlaybackFrom(startSec, "full");
+  playerState.playEndSec = endSec;
+  setStatus("単位波形を再生中");
+}
+
 function seekTo(sec) {
   if (!editedAudioBuffer) return;
 
@@ -1312,7 +1516,6 @@ function drawPreciseLine(ctx, data, startSample, endSample, width, height, strok
       const ratioX = (i - startSample) / Math.max(1, range);
       const x = ratioX * width;
       const y = ((1 - data[i]) * 0.5) * height;
-
       ctx.beginPath();
       ctx.arc(x, y, 2, 0, Math.PI * 2);
       ctx.fill();
@@ -1359,6 +1562,65 @@ function drawEditWaveBackground() {
   }
 }
 
+function drawUnitWaveform() {
+  const width = unitWaveCanvas.clientWidth;
+  const height = unitWaveCanvas.clientHeight;
+
+  unitWaveCtx.clearRect(0, 0, width, height);
+  unitWaveCtx.fillStyle = "#fafafa";
+  unitWaveCtx.fillRect(0, 0, width, height);
+
+  unitWaveCtx.strokeStyle = "#d0d0d0";
+  unitWaveCtx.lineWidth = 1;
+  unitWaveCtx.beginPath();
+  unitWaveCtx.moveTo(0, height / 2);
+  unitWaveCtx.lineTo(width, height / 2);
+  unitWaveCtx.stroke();
+
+  if (!editedAudioBuffer || !analysisState.selectedUnit) {
+    unitWaveCtx.fillStyle = "#888";
+    unitWaveCtx.font = "14px sans-serif";
+    unitWaveCtx.fillText("タップした単位波形がここに表示されます", 16, height / 2 - 8);
+    return;
+  }
+
+  const data = editedAudioBuffer.getChannelData(0);
+  const start = analysisState.selectedUnit.startSample;
+  const end = analysisState.selectedUnit.endSample;
+  const range = Math.max(1, end - start);
+
+  unitWaveCtx.strokeStyle =
+    analysisState.selectedUnit.type === "continuous"
+      ? "rgba(30,30,30,0.98)"
+      : "rgba(255,140,0,0.98)";
+  unitWaveCtx.lineWidth = 1.6;
+  unitWaveCtx.beginPath();
+
+  for (let i = start; i <= end; i++) {
+    const x = ((i - start) / range) * width;
+    const y = ((1 - data[i]) * 0.5) * height;
+
+    if (i === start) unitWaveCtx.moveTo(x, y);
+    else unitWaveCtx.lineTo(x, y);
+  }
+  unitWaveCtx.stroke();
+
+  if (range <= 300) {
+    unitWaveCtx.fillStyle =
+      analysisState.selectedUnit.type === "continuous"
+        ? "rgba(30,30,30,0.98)"
+        : "rgba(255,140,0,0.98)";
+
+    for (let i = start; i <= end; i++) {
+      const x = ((i - start) / range) * width;
+      const y = ((1 - data[i]) * 0.5) * height;
+      unitWaveCtx.beginPath();
+      unitWaveCtx.arc(x, y, 2, 0, Math.PI * 2);
+      unitWaveCtx.fill();
+    }
+  }
+}
+
 function drawMainWaveform() {
   drawWaveformToCanvas(mainCtx, mainCanvas, editedAudioBuffer, viewStart, viewEnd);
 
@@ -1391,35 +1653,6 @@ function drawMainWaveform() {
     mainCtx.stroke();
 
     mainCtx.fillRect(x2 - 6, 0, 12, 20);
-  }
-
-  if (editedAudioBuffer && analysisState.continuousRegions.length) {
-    for (const region of analysisState.continuousRegions) {
-      if (region.endSample < viewStart || region.startSample > viewEnd) continue;
-
-      const rs = Math.max(region.startSample, viewStart);
-      const re = Math.min(region.endSample, viewEnd);
-
-      const x1 = sampleToMainCanvasX(rs);
-      const x2 = sampleToMainCanvasX(re);
-
-      mainCtx.fillStyle = "rgba(40, 180, 80, 0.18)";
-      mainCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
-    }
-  }
-
-  if (editedAudioBuffer && analysisState.transientEvents.length) {
-    for (const ev of analysisState.transientEvents) {
-      if (ev.sample < viewStart || ev.sample > viewEnd) continue;
-
-      const x = sampleToMainCanvasX(ev.sample);
-      mainCtx.strokeStyle = "rgba(255, 140, 0, 0.95)";
-      mainCtx.lineWidth = 2;
-      mainCtx.beginPath();
-      mainCtx.moveTo(x, 0);
-      mainCtx.lineTo(x, height);
-      mainCtx.stroke();
-    }
   }
 
   if (editedAudioBuffer && currentPlayheadSample != null) {
@@ -1507,6 +1740,75 @@ function drawEditWaveform() {
     }
   }
 
+  // 連続区間境界線
+  if (analysisState.continuousRegions.length) {
+    for (const region of analysisState.continuousRegions) {
+      if (region.endSample < start || region.startSample > end) continue;
+
+      const rs = Math.max(region.startSample, start);
+      const re = Math.min(region.endSample, end);
+
+      const x1 = ((rs - start) / Math.max(1, end - start)) * width;
+      const x2 = ((re - start) / Math.max(1, end - start)) * width;
+
+      editCtx.fillStyle = "rgba(40,180,80,0.12)";
+      editCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
+
+      editCtx.strokeStyle = "rgba(20,140,60,0.95)";
+      editCtx.lineWidth = 2;
+      editCtx.beginPath();
+      editCtx.moveTo(x1, 0);
+      editCtx.lineTo(x1, height);
+      editCtx.stroke();
+
+      editCtx.beginPath();
+      editCtx.moveTo(x2, 0);
+      editCtx.lineTo(x2, height);
+      editCtx.stroke();
+    }
+  }
+
+  // 瞬時イベント線
+  if (analysisState.transientEvents.length) {
+    for (const ev of analysisState.transientEvents) {
+      if (ev.sample < start || ev.sample > end) continue;
+
+      const x = ((ev.sample - start) / Math.max(1, end - start)) * width;
+      editCtx.strokeStyle = "rgba(255,140,0,0.95)";
+      editCtx.lineWidth = 2;
+      editCtx.beginPath();
+      editCtx.moveTo(x, 0);
+      editCtx.lineTo(x, height);
+      editCtx.stroke();
+    }
+  }
+
+  // 選択単位強調
+  if (analysisState.selectedUnit) {
+    const us = analysisState.selectedUnit.startSample;
+    const ue = analysisState.selectedUnit.endSample;
+
+    if (!(ue < start || us > end)) {
+      const x1 = ((Math.max(us, start) - start) / Math.max(1, end - start)) * width;
+      const x2 = ((Math.min(ue, end) - start) / Math.max(1, end - start)) * width;
+
+      editCtx.fillStyle = "rgba(180,0,255,0.12)";
+      editCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
+
+      editCtx.strokeStyle = "rgba(180,0,255,0.95)";
+      editCtx.lineWidth = 2;
+      editCtx.beginPath();
+      editCtx.moveTo(x1, 0);
+      editCtx.lineTo(x1, height);
+      editCtx.stroke();
+
+      editCtx.beginPath();
+      editCtx.moveTo(x2, 0);
+      editCtx.lineTo(x2, height);
+      editCtx.stroke();
+    }
+  }
+
   if (editedAudioBuffer && currentPlayheadSample != null) {
     if (currentPlayheadSample >= start && currentPlayheadSample <= end) {
       const x = ((currentPlayheadSample - start) / Math.max(1, end - start)) * width;
@@ -1554,6 +1856,9 @@ function openEditMode() {
   editSession.snapshotBeforeEdit = cloneAudioBuffer(editedAudioBuffer);
   editSession.historyStack = [];
 
+  analysisState.selectedUnit = null;
+  unitInfoText.textContent = "単位波形: なし";
+
   isEditMode = true;
   editorPanel.classList.remove("hidden");
   playerState.lastMode = "edit";
@@ -1564,6 +1869,7 @@ function openEditMode() {
   updateOverlayButton();
   undoBtn.disabled = true;
   drawEditWaveform();
+  drawUnitWaveform();
   setStatus("編集モード");
 }
 
@@ -1581,6 +1887,9 @@ function cancelEditMode() {
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
+  analysisState.selectedUnit = null;
+  unitInfoText.textContent = "単位波形: なし";
+
   isEditMode = false;
   editorPanel.classList.add("hidden");
   undoBtn.disabled = true;
@@ -1591,6 +1900,7 @@ function cancelEditMode() {
   updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
+  drawUnitWaveform();
   setStatus("編集キャンセル");
 }
 
@@ -1604,6 +1914,9 @@ function applyEditMode() {
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
+  analysisState.selectedUnit = null;
+  unitInfoText.textContent = "単位波形: なし";
+
   isEditMode = false;
   editorPanel.classList.add("hidden");
   undoBtn.disabled = true;
@@ -1614,6 +1927,7 @@ function applyEditMode() {
   updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
+  drawUnitWaveform();
   setStatus("編集確定");
 }
 
@@ -1631,6 +1945,7 @@ function undoEditInSession() {
   undoBtn.disabled = editSession.historyStack.length === 0;
   drawEditWaveform();
   drawMainWaveform();
+  drawUnitWaveform();
   setStatus("1段階戻しました");
 }
 
@@ -1801,6 +2116,7 @@ async function loadMaterialFromDB(id) {
     resetView();
     resetSelectionDefault();
     stopPlayback();
+
     isEditMode = false;
     editorPanel.classList.add("hidden");
     editSession.startSample = null;
@@ -1811,11 +2127,14 @@ async function loadMaterialFromDB(id) {
     editSession.overlayMode = "overlay";
     editSession.historyStack = [];
     editSession.snapshotBeforeEdit = null;
+
     setEditInteractionMode("navigate");
     updatePrecisionButton();
     updateOverlayButton();
+
     drawMainWaveform();
     drawEditWaveform();
+    drawUnitWaveform();
     updateMainUIState();
     setStatus("素材を読み込みました");
   } catch (err) {
@@ -2004,8 +2323,6 @@ function updateMainUIState() {
   resetSelectionBtn.disabled = !hasSelection;
   openEditorBtn.disabled = !hasSelection;
 
-  analyzeSelectionBtn.disabled = !hasSelection;
-
   saveCurrentBtn.disabled = !hasAudio;
   saveEditedAsBtn.disabled = !hasAudio;
   saveWavBtn.disabled = !hasAudio;
@@ -2020,6 +2337,7 @@ function updateMainUIState() {
   editFullViewBtn.disabled = !isEditMode;
   precisionToggleBtn.disabled = !isEditMode;
   overlayModeBtn.disabled = !isEditMode;
+  analyzeSelectionBtn.disabled = !isEditMode;
 
   if (!hasAudio) {
     seekBar.value = 0;
@@ -2331,9 +2649,44 @@ editCanvas.addEventListener("pointermove", (event) => {
 });
 
 editCanvas.addEventListener("pointerup", (event) => {
+  const pos = editPointerState.get(event.pointerId);
   editPointerState.delete(event.pointerId);
+
   if (editPointerState.size === 0) {
     isEditPointerDown = false;
+  }
+
+  if (!isEditMode || !editedAudioBuffer || !pos) return;
+  if (editSession.interactionMode !== "navigate") return;
+
+  const sample = editCanvasXToSample(pos.x);
+
+  let nearestTransient = null;
+  let nearestTransientDist = Infinity;
+  for (const ev of analysisState.transientEvents) {
+    const d = Math.abs(ev.sample - sample);
+    if (d < nearestTransientDist) {
+      nearestTransientDist = d;
+      nearestTransient = ev;
+    }
+  }
+
+  const transientThreshold = Math.floor(editedAudioBuffer.sampleRate * 0.015);
+
+  if (nearestTransient && nearestTransientDist <= transientThreshold) {
+    selectTransientUnitAt(nearestTransient.sample);
+    drawEditWaveform();
+    updateAnalysisButtons();
+    return;
+  }
+
+  for (const region of analysisState.continuousRegions) {
+    if (sample >= region.startSample && sample <= region.endSample) {
+      selectContinuousUnitAt(sample);
+      drawEditWaveform();
+      updateAnalysisButtons();
+      return;
+    }
   }
 });
 
@@ -2426,6 +2779,10 @@ playTransientBtn.addEventListener("click", async () => {
 
 clearAnalysisBtn.addEventListener("click", () => {
   clearAnalysis();
+});
+
+playUnitBtn.addEventListener("click", async () => {
+  await playSelectedUnit();
 });
 
 editPlayBtn.addEventListener("click", async () => {
@@ -2580,6 +2937,7 @@ function init() {
   updateMainUIState();
   drawMainWaveform();
   drawEditWaveform();
+  drawUnitWaveform();
   refreshLibrary();
 }
 
