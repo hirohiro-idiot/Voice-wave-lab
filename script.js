@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.2
-// 音声専用 / ループ / 速度変更 / タッチズーム対応
+// Wave Voice Lab v4.3
+// 音声専用 / ループ修正 / 選択範囲内再生 / 速度変更 / タッチズーム対応
 // =====================================================
 
 // ------------------------------
@@ -90,7 +90,8 @@ let currentMaterialSource = "";
 
 let playerState = {
   isPlaying: false,
-  mode: "none", // full / selection / edit
+  mode: "none",      // full / selection / edit
+  lastMode: "full",  // full / selection / edit
   playStartSec: 0,
   playEndSec: 0,
   pausedAtSec: 0,
@@ -145,7 +146,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v42";
+const DB_NAME = "wave_voice_lab_db_v43";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -274,6 +275,23 @@ function updateSpeedLabels() {
   const rate = parseFloat(speedSlider.value);
   speedLabel.textContent = `${rate.toFixed(2)}x`;
   playerState.playbackRate = rate;
+  updatePlaybackInfoText();
+}
+
+function bootStatus() {
+  setStatus("JS起動完了");
+}
+
+function updatePlaybackInfoText() {
+  const modeLabel =
+    playerState.lastMode === "selection"
+      ? "選択範囲"
+      : playerState.lastMode === "edit"
+      ? "編集範囲"
+      : "全体";
+
+  playbackModeInfoEl.textContent =
+    `再生対象: ${modeLabel} / ループ: ${playerState.loopEnabled ? "ON" : "OFF"} / 速度: ${playerState.playbackRate.toFixed(2)}x`;
 }
 
 brushSizeInput.addEventListener("input", updateBrushLabels);
@@ -281,11 +299,6 @@ strengthInput.addEventListener("input", updateBrushLabels);
 speedSlider.addEventListener("input", updateSpeedLabels);
 updateBrushLabels();
 updateSpeedLabels();
-
-// debug helper visible in UI
-function bootStatus() {
-  setStatus("JS起動完了");
-}
 
 // ------------------------------
 // Resize
@@ -428,7 +441,6 @@ async function handleFileLoad(file, sourceLabel = "音声ファイル") {
   }
 }
 
-// inline onchange handler
 window.handleAudioFileInline = async function (event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
@@ -516,10 +528,35 @@ function updateRecordingTime() {
 }
 
 // ------------------------------
-// Player
+// Player helpers
 // ------------------------------
 function getBufferDuration() {
   return editedAudioBuffer ? editedAudioBuffer.duration : 0;
+}
+
+function getModeRange(mode) {
+  if (!editedAudioBuffer) {
+    return { startSec: 0, endSec: 0 };
+  }
+
+  if (mode === "selection" && selectionStart != null && selectionEnd != null) {
+    return {
+      startSec: Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate,
+      endSec: Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate,
+    };
+  }
+
+  if (mode === "edit" && isEditMode && editSession.startSample != null && editSession.endSample != null) {
+    return {
+      startSec: editSession.startSample / editedAudioBuffer.sampleRate,
+      endSec: editSession.endSample / editedAudioBuffer.sampleRate,
+    };
+  }
+
+  return {
+    startSec: 0,
+    endSec: editedAudioBuffer.duration,
+  };
 }
 
 function getCurrentPlaybackSec() {
@@ -565,13 +602,8 @@ function animatePlayback() {
 
   const cur = getCurrentPlaybackSec();
   if (cur >= playerState.playEndSec - 0.002) {
-    if (playerState.loopEnabled) {
-      startPlaybackFrom(playerState.playStartSec, playerState.mode);
-      return;
-    } else {
-      stopPlayback(true);
-      return;
-    }
+    updatePlayerUI();
+    return;
   }
 
   playbackAnimationFrame = requestAnimationFrame(animatePlayback);
@@ -583,26 +615,14 @@ async function startPlaybackFrom(positionSec, mode = "full") {
   await unlockAudio();
   stopCurrentSourceOnly();
 
-  const duration = editedAudioBuffer.duration;
-  let startSec = clamp(positionSec, 0, duration);
-  let endSec = duration;
+  const { startSec: rangeStart, endSec: rangeEnd } = getModeRange(mode);
+
+  let startSec = clamp(positionSec, rangeStart, rangeEnd);
+  let endSec = rangeEnd;
+
   let modeLabel = "全体";
-
-  if (mode === "selection" && selectionStart != null && selectionEnd != null) {
-    const s = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
-    const e = Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
-    startSec = clamp(startSec, s, e);
-    endSec = e;
-    modeLabel = "選択範囲";
-  }
-
-  if (mode === "edit" && isEditMode && editSession.startSample != null && editSession.endSample != null) {
-    const s = editSession.startSample / editedAudioBuffer.sampleRate;
-    const e = editSession.endSample / editedAudioBuffer.sampleRate;
-    startSec = clamp(startSec, s, e);
-    endSec = e;
-    modeLabel = "編集範囲";
-  }
+  if (mode === "selection") modeLabel = "選択範囲";
+  if (mode === "edit") modeLabel = "編集範囲";
 
   if (endSec <= startSec) {
     setStatus("再生範囲が不正です");
@@ -622,17 +642,28 @@ async function startPlaybackFrom(positionSec, mode = "full") {
 
   playerState.isPlaying = true;
   playerState.mode = mode;
+  playerState.lastMode = mode;
   playerState.playStartSec = startSec;
   playerState.playEndSec = endSec;
   playerState.pausedAtSec = startSec;
   playerState.startedAtPerf = performance.now();
 
-  playbackModeInfoEl.textContent = `再生対象: ${modeLabel}`;
+  updatePlaybackInfoText();
   setStatus("再生中...");
 
   source.onended = () => {
-    if (currentSourceNode === source && playerState.isPlaying && !playerState.loopEnabled) {
-      stopPlayback(true);
+    if (currentSourceNode !== source) return;
+    if (!playerState.isPlaying) return;
+
+    if (playerState.loopEnabled) {
+      startPlaybackFrom(rangeStart, mode);
+    } else {
+      playerState.isPlaying = false;
+      playerState.pausedAtSec = rangeEnd;
+      stopCurrentSourceOnly();
+      stopPlaybackAnimation();
+      setStatus("再生終了");
+      updatePlayerUI();
     }
   };
 
@@ -685,44 +716,57 @@ function stopPlayback(fromEnded = false) {
   playerState.startedAtPerf = 0;
 
   if (!fromEnded) {
-    playerState.pausedAtSec = 0;
-    playbackModeInfoEl.textContent = "再生対象: なし";
+    const { startSec } = getModeRange(playerState.lastMode || "full");
+    playerState.pausedAtSec = startSec;
     setStatus("停止");
   } else {
-    playerState.pausedAtSec = 0;
-    playbackModeInfoEl.textContent = "再生対象: なし";
     setStatus("再生終了");
   }
 
   updatePlayerUI();
+  updatePlaybackInfoText();
 }
 
 async function playCurrent() {
-  const start = playerState.pausedAtSec || 0;
-  await startPlaybackFrom(start, "full");
+  if (!editedAudioBuffer) return;
+
+  const mode = playerState.lastMode || "full";
+  const { startSec, endSec } = getModeRange(mode);
+
+  let start = playerState.pausedAtSec || startSec;
+  start = clamp(start, startSec, endSec);
+
+  await startPlaybackFrom(start, mode);
 }
 
 async function playSelection() {
   if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+
   const start = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+  playerState.lastMode = "selection";
+  updatePlaybackInfoText();
   await startPlaybackFrom(start, "selection");
 }
 
 async function playEditRange() {
   if (!isEditMode || !editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
+
   const start = editSession.startSample / editedAudioBuffer.sampleRate;
+  playerState.lastMode = "edit";
+  updatePlaybackInfoText();
   await startPlaybackFrom(start, "edit");
 }
 
 function seekTo(sec) {
   if (!editedAudioBuffer) return;
 
-  const duration = editedAudioBuffer.duration;
-  const newSec = clamp(sec, 0, duration);
+  const mode = playerState.isPlaying ? playerState.mode : (playerState.lastMode || "full");
+  const { startSec, endSec } = getModeRange(mode);
+
+  const newSec = clamp(sec, startSec, endSec);
   playerState.pausedAtSec = newSec;
 
   if (playerState.isPlaying) {
-    const mode = playerState.mode;
     startPlaybackFrom(newSec, mode);
   } else {
     updatePlayerUI();
@@ -731,8 +775,14 @@ function seekTo(sec) {
 
 function skipBy(deltaSec) {
   if (!editedAudioBuffer) return;
+
+  const mode = playerState.isPlaying ? playerState.mode : (playerState.lastMode || "full");
+  const { startSec, endSec } = getModeRange(mode);
+
   const cur = getCurrentPlaybackSec();
-  seekTo(cur + deltaSec);
+  const next = clamp(cur + deltaSec, startSec, endSec);
+
+  seekTo(next);
 }
 
 function toggleLoop() {
@@ -740,6 +790,7 @@ function toggleLoop() {
   const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
   loopToggleBtn.textContent = label;
   editLoopToggleBtn.textContent = label;
+  updatePlaybackInfoText();
 }
 
 // ------------------------------
@@ -786,13 +837,6 @@ function updateSelectionInfo() {
     `選択範囲: ${(s / editedAudioBuffer.sampleRate).toFixed(2)}s ～ ${(e / editedAudioBuffer.sampleRate).toFixed(2)}s`;
 
   updateMainUIState();
-}
-
-function clearSelection() {
-  selectionStart = null;
-  selectionEnd = null;
-  updateSelectionInfo();
-  drawMainWaveform();
 }
 
 function scrollView(direction) {
@@ -1041,7 +1085,9 @@ function openEditMode() {
 
   isEditMode = true;
   editorPanel.classList.remove("hidden");
+  playerState.lastMode = "edit";
   updateEditorInfo();
+  updatePlaybackInfoText();
   undoBtn.disabled = true;
   drawEditWaveform();
   setStatus("編集モード");
@@ -1060,6 +1106,8 @@ function cancelEditMode() {
   isEditMode = false;
   editorPanel.classList.add("hidden");
   undoBtn.disabled = true;
+  playerState.lastMode = "selection";
+  updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
   setStatus("編集キャンセル");
@@ -1074,6 +1122,8 @@ function applyEditMode() {
   isEditMode = false;
   editorPanel.classList.add("hidden");
   undoBtn.disabled = true;
+  playerState.lastMode = "selection";
+  updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
   setStatus("編集確定");
@@ -1446,7 +1496,6 @@ function updateMainUIState() {
     seekBar.value = 0;
     currentTimeLabel.textContent = "0.00s";
     durationLabel.textContent = "0.00s";
-    playbackModeInfoEl.textContent = "再生対象: なし";
     playbackTimeInfoEl.textContent = "再生位置: -";
   } else {
     seekBar.max = 1;
@@ -1456,6 +1505,7 @@ function updateMainUIState() {
   const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
   loopToggleBtn.textContent = label;
   editLoopToggleBtn.textContent = label;
+  updatePlaybackInfoText();
 }
 
 // ------------------------------
@@ -1780,6 +1830,8 @@ resetSelectionBtn.addEventListener("click", () => {
 });
 
 openEditorBtn.addEventListener("click", () => {
+  playerState.lastMode = "selection";
+  updatePlaybackInfoText();
   openEditMode();
 });
 
