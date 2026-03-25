@@ -5,7 +5,10 @@ const viewInfoEl = document.getElementById("viewInfo");
 const selectionInfoEl = document.getElementById("selectionInfo");
 
 const recordBtn = document.getElementById("recordBtn");
-const fileInput = document.getElementById("fileInput");
+const audioInput = document.getElementById("audioInput");
+const videoInput = document.getElementById("videoInput");
+const anyFileInput = document.getElementById("anyFileInput");
+
 const playOriginalBtn = document.getElementById("playOriginalBtn");
 const playEditedBtn = document.getElementById("playEditedBtn");
 const stopBtn = document.getElementById("stopBtn");
@@ -43,7 +46,6 @@ let viewEnd = 0;
 
 let selectionStart = null;
 let selectionEnd = null;
-let isSelecting = false;
 
 let isPointerDown = false;
 let lastPointerX = null;
@@ -170,7 +172,6 @@ function clampSample(v) {
 function clearSelection() {
   selectionStart = null;
   selectionEnd = null;
-  isSelecting = false;
   selectionInfoEl.textContent = "選択範囲: なし";
   playSelectionBtn.disabled = true;
 }
@@ -233,32 +234,63 @@ function loadDecodedBuffer(decoded, label = "読込完了") {
   setStatus(label);
 }
 
+function getFileExtension(name) {
+  const idx = name.lastIndexOf(".");
+  if (idx === -1) return "";
+  return name.slice(idx).toLowerCase();
+}
+
+function isLikelyAudioFile(file) {
+  const ext = getFileExtension(file.name);
+  const audioExts = [".wav", ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".flac", ".aif", ".aiff"];
+  return (file.type && file.type.startsWith("audio/")) || audioExts.includes(ext);
+}
+
+function isLikelyVideoFile(file) {
+  const ext = getFileExtension(file.name);
+  const videoExts = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
+  return (file.type && file.type.startsWith("video/")) || videoExts.includes(ext);
+}
+
 async function decodeFileToAudioBuffer(file) {
   ensureAudioContext();
-
   const arrayBuffer = await file.arrayBuffer();
 
   try {
     const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
     return decoded;
   } catch (err) {
-    throw new Error("このファイル形式はブラウザでデコードできませんでした");
+    throw new Error("ブラウザでデコードできない形式です");
   }
 }
 
-async function handleFileLoad(file) {
+async function handleFileLoad(file, sourceLabel = "ファイル") {
   if (!file) return;
 
-  fileInfoEl.textContent = `選択ファイル: ${file.name}`;
+  const ext = getFileExtension(file.name);
+  const typeLabel = file.type || "type不明";
+
+  fileInfoEl.textContent = `${sourceLabel}: ${file.name} / ${typeLabel || ext || "不明"}`;
   setStatus("ファイル読込中...");
+
+  if (!isLikelyAudioFile(file) && !isLikelyVideoFile(file)) {
+    setStatus("非対応の可能性があります");
+  }
 
   try {
     const decoded = await decodeFileToAudioBuffer(file);
-    loadDecodedBuffer(decoded, "ファイル読込完了");
+    loadDecodedBuffer(decoded, `${sourceLabel}読込完了`);
   } catch (err) {
     console.error(err);
     setStatus("ファイル読込失敗");
-    alert("音声の読み込みに失敗しました。\n音声ファイルまたは音声トラック付き動画ファイルを確認してください。");
+    alert(
+      "読み込みに失敗しました。\n\n" +
+      "試してほしいこと:\n" +
+      "1. まず『なんでも選択』から選ぶ\n" +
+      "2. 音声は mp3 / wav / m4a を試す\n" +
+      "3. 動画は mp4 を試す\n" +
+      "4. その動画に音声トラックが入っているか確認する"
+    );
   }
 }
 
@@ -281,6 +313,7 @@ async function startRecording() {
         const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
         const fileLike = new File([blob], "recorded_audio.webm", { type: blob.type });
         const decoded = await decodeFileToAudioBuffer(fileLike);
+        fileInfoEl.textContent = "マイク録音データ";
         loadDecodedBuffer(decoded, "録音完了");
       } catch (err) {
         console.error(err);
@@ -439,7 +472,6 @@ function applySmoothTool(sampleCenter) {
 
   const start = Math.max(1, sampleCenter - radius);
   const end = Math.min(data.length - 2, sampleCenter + radius);
-
   const snapshot = new Float32Array(data.slice(start - 1, end + 2));
 
   for (let i = start; i <= end; i++) {
@@ -616,6 +648,7 @@ function exportEditedWav() {
 
   const wavBlob = audioBufferToWavBlob(editedAudioBuffer);
   const url = URL.createObjectURL(wavBlob);
+
   const a = document.createElement("a");
   a.href = url;
   a.download = "edited_voice.wav";
@@ -644,7 +677,6 @@ canvas.addEventListener("pointerdown", (event) => {
   lastPointerY = y;
 
   if (toolSelect.value === "select") {
-    isSelecting = true;
     selectionStart = canvasXToSample(x);
     selectionEnd = selectionStart;
     updateSelectionInfo();
@@ -683,12 +715,10 @@ canvas.addEventListener("pointermove", (event) => {
 
 canvas.addEventListener("pointerup", () => {
   isPointerDown = false;
-  isSelecting = false;
 });
 
 canvas.addEventListener("pointercancel", () => {
   isPointerDown = false;
-  isSelecting = false;
 });
 
 recordBtn.addEventListener("click", async () => {
@@ -699,9 +729,22 @@ recordBtn.addEventListener("click", async () => {
   }
 });
 
-fileInput.addEventListener("change", async (event) => {
+audioInput.addEventListener("change", async (event) => {
   const file = event.target.files && event.target.files[0];
-  await handleFileLoad(file);
+  await handleFileLoad(file, "音声ファイル");
+  audioInput.value = "";
+});
+
+videoInput.addEventListener("change", async (event) => {
+  const file = event.target.files && event.target.files[0];
+  await handleFileLoad(file, "動画ファイル");
+  videoInput.value = "";
+});
+
+anyFileInput.addEventListener("change", async (event) => {
+  const file = event.target.files && event.target.files[0];
+  await handleFileLoad(file, "任意ファイル");
+  anyFileInput.value = "";
 });
 
 playOriginalBtn.addEventListener("click", () => {
