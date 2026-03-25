@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.9
-// 音声専用 / 精密表示 / 元波形オーバーレイ / 周期単位抽出
+// Wave Voice Lab v4.9.1
+// 音声専用 / 精密表示 / 元波形オーバーレイ / 周期単位抽出 / 音声専用強化
 // =====================================================
 
 // ------------------------------
@@ -146,9 +146,9 @@ let lastTapX = 0;
 // Analysis state
 // ------------------------------
 let analysisState = {
-  continuousRegions: [],   // [{startSample, endSample}]
-  transientEvents: [],     // [{sample}]
-  selectedUnit: null,      // {type, startSample, endSample, centerSample, ...}
+  continuousRegions: [],
+  transientEvents: [],
+  selectedUnit: null,
 };
 
 // ------------------------------
@@ -160,9 +160,9 @@ let editSession = {
   endSample: null,
   viewStartSample: null,
   viewEndSample: null,
-  interactionMode: "navigate", // navigate / draw
+  interactionMode: "navigate",
   precisionMode: false,
-  overlayMode: "overlay", // edited / original / overlay
+  overlayMode: "overlay",
   snapshotBeforeEdit: null,
   historyStack: [],
 };
@@ -185,7 +185,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v49";
+const DB_NAME = "wave_voice_lab_db_v491";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -357,6 +357,29 @@ function updateOverlayButton() {
     original: "表示: 元のみ",
   };
   overlayModeBtn.textContent = map[editSession.overlayMode];
+}
+
+function isAllowedAudioFile(file) {
+  const name = (file.name || "").toLowerCase();
+  const type = (file.type || "").toLowerCase();
+
+  const allowedExt = [
+    ".wav",
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".oga",
+    ".flac",
+    ".aif",
+    ".aiff",
+    ".webm"
+  ];
+
+  const hasAllowedExt = allowedExt.some(ext => name.endsWith(ext));
+  const isAudioMime = type.startsWith("audio/");
+
+  return hasAllowedExt || isAudioMime;
 }
 
 brushSizeInput.addEventListener("input", updateBrushLabels);
@@ -849,6 +872,14 @@ window.handleAudioFileInline = async function (event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
 
+  if (!isAllowedAudioFile(file)) {
+    alert("音声ファイルのみ選択できます。");
+    fileInfoEl.textContent = "音声以外のファイルは読み込めません";
+    setStatus("音声ファイルを選択してください");
+    event.target.value = "";
+    return;
+  }
+
   fileInfoEl.textContent = `音声ファイル: ${file.name} / ${file.type || "type不明"}`;
   setStatus("ファイル読込中...");
 
@@ -882,6 +913,12 @@ async function startRecording() {
       try {
         const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
         const fileLike = new File([blob], "recorded_audio.webm", { type: blob.type });
+
+        if (!isAllowedAudioFile(fileLike)) {
+          setStatus("録音データ形式が不正です");
+          return;
+        }
+
         const decoded = await decodeFileToAudioBuffer(fileLike);
 
         currentMaterialName = `record_${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -1740,7 +1777,6 @@ function drawEditWaveform() {
     }
   }
 
-  // 連続区間境界線
   if (analysisState.continuousRegions.length) {
     for (const region of analysisState.continuousRegions) {
       if (region.endSample < start || region.startSample > end) continue;
@@ -1768,7 +1804,6 @@ function drawEditWaveform() {
     }
   }
 
-  // 瞬時イベント線
   if (analysisState.transientEvents.length) {
     for (const ev of analysisState.transientEvents) {
       if (ev.sample < start || ev.sample > end) continue;
@@ -1783,7 +1818,6 @@ function drawEditWaveform() {
     }
   }
 
-  // 選択単位強調
   if (analysisState.selectedUnit) {
     const us = analysisState.selectedUnit.startSample;
     const ue = analysisState.selectedUnit.endSample;
