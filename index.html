@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wave Voice Lab</title>
+  <title>Wave Voice Lab v2</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <h1>Wave Voice Lab</h1>
-      <p class="subtitle">マイク録音 / 音声読込 / 動画読込 → 波形編集 → 再生</p>
+      <h1>Wave Voice Lab v2</h1>
+      <p class="subtitle">録音 / 音声読込 / 動画読込 / 保存 / 波形編集 / 再生</p>
     </header>
 
     <main class="main">
@@ -58,7 +58,25 @@
         </div>
       </section>
 
+      <section class="panel library-panel">
+        <h2>素材ライブラリ</h2>
+
+        <div class="row">
+          <input id="saveNameInput" type="text" placeholder="保存名を入力" class="name-input" />
+          <button id="saveCurrentBtn" disabled>保存</button>
+          <button id="saveEditedAsBtn" disabled>編集版を別保存</button>
+          <button id="refreshLibraryBtn">一覧更新</button>
+        </div>
+
+        <div id="libraryList" class="library-list"></div>
+      </section>
+
       <section class="panel waveform-panel">
+        <div class="playback-bar">
+          <span id="playbackModeInfo">再生対象: なし</span>
+          <span id="playbackTimeInfo">再生位置: -</span>
+        </div>
+
         <div class="canvas-wrap">
           <canvas id="waveCanvas"></canvas>
         </div>
@@ -70,23 +88,28 @@
       </section>
 
       <section class="panel controls">
+        <h2>再生</h2>
         <div class="row">
           <button id="playOriginalBtn" disabled>元音声再生</button>
           <button id="playEditedBtn" disabled>編集後再生</button>
+          <button id="playSelectionBtn" disabled>選択再生</button>
           <button id="stopBtn" disabled>停止</button>
         </div>
+      </section>
+
+      <section class="panel navigation-panel">
+        <h2>表示操作</h2>
 
         <div class="row">
-          <button id="undoBtn" disabled>元に戻す</button>
-          <button id="resetBtn" disabled>編集リセット</button>
-          <button id="saveBtn" disabled>WAV保存</button>
+          <button id="scrollLeftBtn" disabled>← 左へ</button>
+          <button id="scrollRightBtn" disabled>右へ →</button>
         </div>
 
         <div class="row">
           <button id="zoomInBtn" disabled>拡大</button>
           <button id="zoomOutBtn" disabled>縮小</button>
+          <button id="zoomToSelectionBtn" disabled>選択範囲へズーム</button>
           <button id="fullViewBtn" disabled>全体表示</button>
-          <button id="playSelectionBtn" disabled>選択再生</button>
         </div>
       </section>
 
@@ -115,18 +138,22 @@
           <input type="range" id="strength" min="1" max="100" value="30" />
           <span id="strengthValue">30</span>
         </div>
+
+        <div class="row">
+          <button id="undoBtn" disabled>元に戻す</button>
+          <button id="resetBtn" disabled>編集リセット</button>
+          <button id="saveWavBtn" disabled>WAV保存</button>
+        </div>
       </section>
 
       <section class="panel help-panel">
         <h2>使い方</h2>
         <p>
-          音声ファイル、動画ファイル、または録音から音を読み込めます。<br>
-          iPadで選べない場合は「なんでも選択」を使ってください。<br>
-          Draw: 波形を上下に変形します。<br>
-          Smooth: 局所的になめらかにします。<br>
-          Gain: 局所的に振幅を増やします。<br>
-          Erase: 局所的に振幅を減らします。<br>
-          Select: 範囲選択してその部分だけ再生できます。
+          まず録音またはファイル読込を行います。<br>
+          波形上で Select を使うと範囲選択できます。<br>
+          横スクロールは左右ボタン、拡大縮小は別ボタンで行います。<br>
+          保存するとブラウザ内ライブラリに登録されます。<br>
+          編集版は別素材として保存できます。
         </p>
       </section>
     </main>
