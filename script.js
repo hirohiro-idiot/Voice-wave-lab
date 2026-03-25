@@ -1,5 +1,6 @@
 // =====================================================
-// Wave Voice Lab v3.1
+// Wave Voice Lab v4
+// 音声専用 / ループ / 速度変更 / タッチズーム対応
 // =====================================================
 
 // ------------------------------
@@ -15,11 +16,7 @@ const playbackTimeInfoEl = document.getElementById("playbackTimeInfo");
 
 const recordBtn = document.getElementById("recordBtn");
 const openAudioPickerBtn = document.getElementById("openAudioPickerBtn");
-const openVideoPickerBtn = document.getElementById("openVideoPickerBtn");
-const openAnyPickerBtn = document.getElementById("openAnyPickerBtn");
 const audioInput = document.getElementById("audioInput");
-const videoInput = document.getElementById("videoInput");
-const anyFileInput = document.getElementById("anyFileInput");
 
 const saveNameInput = document.getElementById("saveNameInput");
 const saveCurrentBtn = document.getElementById("saveCurrentBtn");
@@ -35,6 +32,10 @@ const stopBtn = document.getElementById("stopBtn");
 const seekBar = document.getElementById("seekBar");
 const currentTimeLabel = document.getElementById("currentTimeLabel");
 const durationLabel = document.getElementById("durationLabel");
+
+const loopToggleBtn = document.getElementById("loopToggleBtn");
+const speedSlider = document.getElementById("speedSlider");
+const speedLabel = document.getElementById("speedLabel");
 
 const playSelectionBtn = document.getElementById("playSelectionBtn");
 const zoomToSelectionBtn = document.getElementById("zoomToSelectionBtn");
@@ -58,6 +59,11 @@ const undoBtn = document.getElementById("undoBtn");
 const cancelEditBtn = document.getElementById("cancelEditBtn");
 const applyEditBtn = document.getElementById("applyEditBtn");
 const saveWavBtn = document.getElementById("saveWavBtn");
+
+const editPlayBtn = document.getElementById("editPlayBtn");
+const editPauseBtn = document.getElementById("editPauseBtn");
+const editStopBtn = document.getElementById("editStopBtn");
+const editLoopToggleBtn = document.getElementById("editLoopToggleBtn");
 
 const mainCanvas = document.getElementById("mainWaveCanvas");
 const mainCtx = mainCanvas.getContext("2d");
@@ -85,11 +91,13 @@ let currentMaterialSource = "";
 
 let playerState = {
   isPlaying: false,
-  mode: "none", // full / selection
+  mode: "none", // full / selection / edit
   playStartSec: 0,
   playEndSec: 0,
   pausedAtSec: 0,
   startedAtPerf: 0,
+  loopEnabled: false,
+  playbackRate: 1.0,
 };
 
 let playbackAnimationFrame = null;
@@ -102,11 +110,19 @@ let isSeeking = false;
 let viewStart = 0;
 let viewEnd = 0;
 
-// selection bars on main view
 let selectionStart = null;
 let selectionEnd = null;
 let draggingSelectionHandle = null; // "start" | "end" | null
 const selectionHandleThresholdPx = 20;
+
+// gesture state for main canvas
+let mainPointerState = new Map();
+let panStartViewStart = 0;
+let panStartViewEnd = 0;
+let panLastCenterX = 0;
+let pinchStartDistance = 0;
+let pinchStartViewStart = 0;
+let pinchStartViewEnd = 0;
 
 // ------------------------------
 // Edit mode state
@@ -130,7 +146,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v31";
+const DB_NAME = "wave_voice_lab_db_v4";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -255,9 +271,17 @@ function updateBrushLabels() {
   strengthValue.textContent = strengthInput.value;
 }
 
+function updateSpeedLabels() {
+  const rate = parseFloat(speedSlider.value);
+  speedLabel.textContent = `${rate.toFixed(2)}x`;
+  playerState.playbackRate = rate;
+}
+
 brushSizeInput.addEventListener("input", updateBrushLabels);
 strengthInput.addEventListener("input", updateBrushLabels);
+speedSlider.addEventListener("input", updateSpeedLabels);
 updateBrushLabels();
+updateSpeedLabels();
 
 // ------------------------------
 // Resize
@@ -382,7 +406,7 @@ function loadDecodedBuffer(decoded, label = "読込完了", source = "") {
   fileInfoEl.textContent = `${source}: ${currentMaterialName}`;
 }
 
-async function handleFileLoad(file, sourceLabel = "ファイル") {
+async function handleFileLoad(file, sourceLabel = "音声ファイル") {
   if (!file) return;
 
   currentMaterialName = file.name;
@@ -396,14 +420,7 @@ async function handleFileLoad(file, sourceLabel = "ファイル") {
   } catch (err) {
     console.error(err);
     setStatus("ファイル読込失敗");
-    alert(
-      "読み込みに失敗しました。\n\n" +
-      "試してほしいこと:\n" +
-      "1. なんでも選択から選ぶ\n" +
-      "2. 音声は mp3 / wav / m4a\n" +
-      "3. 動画は mp4\n" +
-      "4. 動画に音声トラックがあるか確認"
-    );
+    alert("読み込みに失敗しました。mp3 / wav / m4a などで試してください。");
   }
 }
 
@@ -484,8 +501,9 @@ function getBufferDuration() {
 
 function getCurrentPlaybackSec() {
   if (!playerState.isPlaying) return playerState.pausedAtSec || 0;
-  const elapsed = (performance.now() - playerState.startedAtPerf) / 1000;
-  return clamp(playerState.playStartSec + elapsed, 0, playerState.playEndSec);
+  const elapsedRealSec = (performance.now() - playerState.startedAtPerf) / 1000;
+  const progressedAudioSec = elapsedRealSec * playerState.playbackRate;
+  return clamp(playerState.playStartSec + progressedAudioSec, 0, playerState.playEndSec);
 }
 
 function stopPlaybackAnimation() {
@@ -520,14 +538,20 @@ function updatePlayerUI() {
 function animatePlayback() {
   updatePlayerUI();
 
-  if (playerState.isPlaying) {
-    const cur = getCurrentPlaybackSec();
-    if (cur >= playerState.playEndSec - 0.005) {
+  if (!playerState.isPlaying) return;
+
+  const cur = getCurrentPlaybackSec();
+  if (cur >= playerState.playEndSec - 0.002) {
+    if (playerState.loopEnabled) {
+      startPlaybackFrom(playerState.playStartSec, playerState.mode);
+      return;
+    } else {
       stopPlayback(true);
       return;
     }
-    playbackAnimationFrame = requestAnimationFrame(animatePlayback);
   }
+
+  playbackAnimationFrame = requestAnimationFrame(animatePlayback);
 }
 
 async function startPlaybackFrom(positionSec, mode = "full") {
@@ -549,6 +573,14 @@ async function startPlaybackFrom(positionSec, mode = "full") {
     modeLabel = "選択範囲";
   }
 
+  if (mode === "edit" && isEditMode && editSession.startSample != null && editSession.endSample != null) {
+    const s = editSession.startSample / editedAudioBuffer.sampleRate;
+    const e = editSession.endSample / editedAudioBuffer.sampleRate;
+    startSec = clamp(startSec, s, e);
+    endSec = e;
+    modeLabel = "編集範囲";
+  }
+
   if (endSec <= startSec) {
     setStatus("再生範囲が不正です");
     return;
@@ -557,6 +589,7 @@ async function startPlaybackFrom(positionSec, mode = "full") {
   const source = audioContext.createBufferSource();
   const gainNode = audioContext.createGain();
   source.buffer = editedAudioBuffer;
+  source.playbackRate.value = playerState.playbackRate;
   gainNode.gain.value = 1.0;
   source.connect(gainNode);
   gainNode.connect(audioContext.destination);
@@ -575,13 +608,14 @@ async function startPlaybackFrom(positionSec, mode = "full") {
   setStatus("再生中...");
 
   source.onended = () => {
-    if (currentSourceNode === source && playerState.isPlaying) {
+    if (currentSourceNode === source && playerState.isPlaying && !playerState.loopEnabled) {
       stopPlayback(true);
     }
   };
 
   try {
-    source.start(0, startSec, endSec - startSec);
+    const realDuration = (endSec - startSec) / playerState.playbackRate;
+    source.start(0, startSec, realDuration);
   } catch (err) {
     console.error(err);
     setStatus("再生失敗");
@@ -651,6 +685,12 @@ async function playSelection() {
   await startPlaybackFrom(start, "selection");
 }
 
+async function playEditRange() {
+  if (!isEditMode || !editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
+  const start = editSession.startSample / editedAudioBuffer.sampleRate;
+  await startPlaybackFrom(start, "edit");
+}
+
 function seekTo(sec) {
   if (!editedAudioBuffer) return;
 
@@ -659,7 +699,7 @@ function seekTo(sec) {
   playerState.pausedAtSec = newSec;
 
   if (playerState.isPlaying) {
-    const mode = playerState.mode === "selection" ? "selection" : "full";
+    const mode = playerState.mode;
     startPlaybackFrom(newSec, mode);
   } else {
     updatePlayerUI();
@@ -670,6 +710,13 @@ function skipBy(deltaSec) {
   if (!editedAudioBuffer) return;
   const cur = getCurrentPlaybackSec();
   seekTo(cur + deltaSec);
+}
+
+function toggleLoop() {
+  playerState.loopEnabled = !playerState.loopEnabled;
+  const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
+  loopToggleBtn.textContent = label;
+  editLoopToggleBtn.textContent = label;
 }
 
 // ------------------------------
@@ -751,11 +798,11 @@ function scrollView(direction) {
   drawMainWaveform();
 }
 
-function zoomView(factor) {
+function zoomView(factor, centerSample = null) {
   if (!editedAudioBuffer) return;
 
   const currentLength = viewEnd - viewStart;
-  const center = viewStart + currentLength / 2;
+  const center = centerSample == null ? viewStart + currentLength / 2 : centerSample;
   let newLength = Math.floor(currentLength * factor);
 
   const minLength = 500;
@@ -826,8 +873,20 @@ function getEditCanvasLocalPos(event) {
   };
 }
 
+function distanceBetweenTouches(points) {
+  if (points.length < 2) return 0;
+  const dx = points[0].x - points[1].x;
+  const dy = points[0].y - points[1].y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function centerBetweenTouches(points) {
+  if (!points.length) return 0;
+  return points.reduce((sum, p) => sum + p.x, 0) / points.length;
+}
+
 // ------------------------------
-// Draw main waveform
+// Draw waveform
 // ------------------------------
 function drawWaveformToCanvas(ctx, canvas, buffer, startSample, endSample) {
   const width = canvas.clientWidth;
@@ -1027,6 +1086,20 @@ function drawEditWaveform() {
     editSession.startSample,
     editSession.endSample
   );
+
+  if (editedAudioBuffer && currentPlayheadSample != null) {
+    const s = editSession.startSample;
+    const e = editSession.endSample;
+    if (currentPlayheadSample >= s && currentPlayheadSample <= e) {
+      const x = ((currentPlayheadSample - s) / (e - s)) * editCanvas.clientWidth;
+      editCtx.strokeStyle = "rgba(255, 0, 0, 0.95)";
+      editCtx.lineWidth = 2;
+      editCtx.beginPath();
+      editCtx.moveTo(x, 0);
+      editCtx.lineTo(x, editCanvas.clientHeight);
+      editCtx.stroke();
+    }
+  }
 }
 
 function editCanvasXToSample(x) {
@@ -1323,6 +1396,8 @@ function updateMainUIState() {
   forwardBtn.disabled = !hasAudio;
   stopBtn.disabled = !hasAudio;
   seekBar.disabled = !hasAudio;
+  loopToggleBtn.disabled = !hasAudio;
+  speedSlider.disabled = !hasAudio;
 
   scrollLeftBtn.disabled = !hasAudio;
   scrollRightBtn.disabled = !hasAudio;
@@ -1339,6 +1414,11 @@ function updateMainUIState() {
   saveEditedAsBtn.disabled = !hasAudio;
   saveWavBtn.disabled = !hasAudio;
 
+  editPlayBtn.disabled = !hasAudio;
+  editPauseBtn.disabled = !hasAudio;
+  editStopBtn.disabled = !hasAudio;
+  editLoopToggleBtn.disabled = !hasAudio;
+
   if (!hasAudio) {
     seekBar.value = 0;
     currentTimeLabel.textContent = "0.00s";
@@ -1349,72 +1429,180 @@ function updateMainUIState() {
     seekBar.max = 1;
     updatePlayerUI();
   }
+
+  const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
+  loopToggleBtn.textContent = label;
+  editLoopToggleBtn.textContent = label;
 }
 
 // ------------------------------
-// Main canvas selection handles
+// Main canvas gesture handlers
 // ------------------------------
 mainCanvas.addEventListener("pointerdown", async (event) => {
   if (!editedAudioBuffer || isEditMode) return;
-
   await unlockAudio();
 
-  const { x } = getMainCanvasLocalPos(event);
+  const pos = getMainCanvasLocalPos(event);
+  mainPointerState.set(event.pointerId, pos);
+  mainCanvas.setPointerCapture(event.pointerId);
 
-  const sx = selectionStart != null ? sampleToMainCanvasX(selectionStart) : null;
-  const ex = selectionEnd != null ? sampleToMainCanvasX(selectionEnd) : null;
+  const pointers = Array.from(mainPointerState.values());
 
-  if (sx != null && Math.abs(x - sx) <= selectionHandleThresholdPx) {
-    draggingSelectionHandle = "start";
-    mainCanvas.setPointerCapture(event.pointerId);
-    return;
+  if (pointers.length === 1) {
+    const x = pos.x;
+    const sx = selectionStart != null ? sampleToMainCanvasX(selectionStart) : null;
+    const ex = selectionEnd != null ? sampleToMainCanvasX(selectionEnd) : null;
+
+    if (sx != null && Math.abs(x - sx) <= selectionHandleThresholdPx) {
+      draggingSelectionHandle = "start";
+      return;
+    }
+
+    if (ex != null && Math.abs(x - ex) <= selectionHandleThresholdPx) {
+      draggingSelectionHandle = "end";
+      return;
+    }
+
+    panStartViewStart = viewStart;
+    panStartViewEnd = viewEnd;
+    panLastCenterX = x;
   }
 
-  if (ex != null && Math.abs(x - ex) <= selectionHandleThresholdPx) {
-    draggingSelectionHandle = "end";
-    mainCanvas.setPointerCapture(event.pointerId);
-    return;
+  if (pointers.length === 2) {
+    draggingSelectionHandle = null;
+    pinchStartDistance = distanceBetweenTouches(pointers);
+    pinchStartViewStart = viewStart;
+    pinchStartViewEnd = viewEnd;
+    panLastCenterX = centerBetweenTouches(pointers);
   }
-
-  const sample = mainCanvasXToSample(x);
-  const sec = sample / editedAudioBuffer.sampleRate;
-  seekTo(sec);
 });
 
 mainCanvas.addEventListener("pointermove", (event) => {
-  if (!editedAudioBuffer || !draggingSelectionHandle) return;
+  if (!editedAudioBuffer || isEditMode) return;
+  if (!mainPointerState.has(event.pointerId)) return;
 
-  const { x } = getMainCanvasLocalPos(event);
-  const sample = mainCanvasXToSample(x);
+  const pos = getMainCanvasLocalPos(event);
+  mainPointerState.set(event.pointerId, pos);
+  const pointers = Array.from(mainPointerState.values());
 
-  if (draggingSelectionHandle === "start") {
-    selectionStart = clamp(sample, 0, editedAudioBuffer.length);
-    if (selectionEnd != null && selectionStart > selectionEnd) {
-      const tmp = selectionStart;
-      selectionStart = selectionEnd;
-      selectionEnd = tmp;
-      draggingSelectionHandle = "end";
+  if (draggingSelectionHandle && pointers.length === 1) {
+    const sample = mainCanvasXToSample(pos.x);
+
+    if (draggingSelectionHandle === "start") {
+      selectionStart = clamp(sample, 0, editedAudioBuffer.length);
+      if (selectionEnd != null && selectionStart > selectionEnd) {
+        const tmp = selectionStart;
+        selectionStart = selectionEnd;
+        selectionEnd = tmp;
+        draggingSelectionHandle = "end";
+      }
+    } else if (draggingSelectionHandle === "end") {
+      selectionEnd = clamp(sample, 0, editedAudioBuffer.length);
+      if (selectionStart != null && selectionEnd < selectionStart) {
+        const tmp = selectionEnd;
+        selectionEnd = selectionStart;
+        selectionStart = tmp;
+        draggingSelectionHandle = "start";
+      }
     }
-  } else if (draggingSelectionHandle === "end") {
-    selectionEnd = clamp(sample, 0, editedAudioBuffer.length);
-    if (selectionStart != null && selectionEnd < selectionStart) {
-      const tmp = selectionEnd;
-      selectionEnd = selectionStart;
-      selectionStart = tmp;
-      draggingSelectionHandle = "start";
-    }
+
+    updateSelectionInfo();
+    drawMainWaveform();
+    return;
   }
 
-  updateSelectionInfo();
-  drawMainWaveform();
+  if (pointers.length === 1) {
+    const currentX = pointers[0].x;
+    const dx = currentX - panLastCenterX;
+    panLastCenterX = currentX;
+
+    const samplesPerPx = (viewEnd - viewStart) / Math.max(1, mainCanvas.clientWidth);
+    const shiftSamples = Math.round(-dx * samplesPerPx);
+
+    let newStart = viewStart + shiftSamples;
+    let newEnd = viewEnd + shiftSamples;
+
+    if (newStart < 0) {
+      newEnd -= newStart;
+      newStart = 0;
+    }
+    if (newEnd > editedAudioBuffer.length) {
+      const over = newEnd - editedAudioBuffer.length;
+      newStart -= over;
+      newEnd = editedAudioBuffer.length;
+    }
+
+    viewStart = clamp(newStart, 0, editedAudioBuffer.length);
+    viewEnd = clamp(newEnd, 0, editedAudioBuffer.length);
+    updateViewInfo();
+    drawMainWaveform();
+    return;
+  }
+
+  if (pointers.length >= 2) {
+    const dist = distanceBetweenTouches(pointers);
+    const centerX = centerBetweenTouches(pointers);
+
+    if (pinchStartDistance > 0 && dist > 0) {
+      const startLen = pinchStartViewEnd - pinchStartViewStart;
+      let newLen = Math.floor(startLen * (pinchStartDistance / dist));
+      newLen = clamp(newLen, 500, editedAudioBuffer.length);
+
+      const centerRatio = clamp(centerX / Math.max(1, mainCanvas.clientWidth), 0, 1);
+      const anchorSample = Math.floor(pinchStartViewStart + centerRatio * startLen);
+
+      let newStart = Math.floor(anchorSample - centerRatio * newLen);
+      let newEnd = newStart + newLen;
+
+      if (newStart < 0) {
+        newEnd -= newStart;
+        newStart = 0;
+      }
+      if (newEnd > editedAudioBuffer.length) {
+        const over = newEnd - editedAudioBuffer.length;
+        newStart -= over;
+        newEnd = editedAudioBuffer.length;
+      }
+
+      viewStart = clamp(newStart, 0, editedAudioBuffer.length);
+      viewEnd = clamp(newEnd, 0, editedAudioBuffer.length);
+      updateViewInfo();
+      drawMainWaveform();
+    }
+  }
 });
 
-mainCanvas.addEventListener("pointerup", () => {
-  draggingSelectionHandle = null;
+mainCanvas.addEventListener("pointerup", (event) => {
+  mainPointerState.delete(event.pointerId);
+  if (mainPointerState.size === 0) {
+    draggingSelectionHandle = null;
+  }
 });
 
-mainCanvas.addEventListener("pointercancel", () => {
-  draggingSelectionHandle = null;
+mainCanvas.addEventListener("pointercancel", (event) => {
+  mainPointerState.delete(event.pointerId);
+  if (mainPointerState.size === 0) {
+    draggingSelectionHandle = null;
+  }
+});
+
+// tap to seek after click-like action
+mainCanvas.addEventListener("click", (event) => {
+  if (!editedAudioBuffer || isEditMode) return;
+  if (draggingSelectionHandle) return;
+
+  const pos = getMainCanvasLocalPos(event);
+  const sx = selectionStart != null ? sampleToMainCanvasX(selectionStart) : null;
+  const ex = selectionEnd != null ? sampleToMainCanvasX(selectionEnd) : null;
+
+  if ((sx != null && Math.abs(pos.x - sx) <= selectionHandleThresholdPx) ||
+      (ex != null && Math.abs(pos.x - ex) <= selectionHandleThresholdPx)) {
+    return;
+  }
+
+  const sample = mainCanvasXToSample(pos.x);
+  const sec = sample / editedAudioBuffer.sampleRate;
+  seekTo(sec);
 });
 
 // ------------------------------
@@ -1475,6 +1663,7 @@ seekBar.addEventListener("input", () => {
   playbackTimeInfoEl.textContent = `再生位置: ${formatSec(sec)}`;
   currentPlayheadSample = Math.floor(sec * editedAudioBuffer.sampleRate);
   drawMainWaveform();
+  if (isEditMode) drawEditWaveform();
 });
 
 seekBar.addEventListener("change", () => {
@@ -1491,14 +1680,6 @@ openAudioPickerBtn.addEventListener("click", () => {
   audioInput.click();
 });
 
-openVideoPickerBtn.addEventListener("click", () => {
-  videoInput.click();
-});
-
-openAnyPickerBtn.addEventListener("click", () => {
-  anyFileInput.click();
-});
-
 recordBtn.addEventListener("click", async () => {
   if (!mediaRecorder || mediaRecorder.state === "inactive") {
     await startRecording();
@@ -1511,18 +1692,6 @@ audioInput.addEventListener("change", async (event) => {
   const file = event.target.files && event.target.files[0];
   await handleFileLoad(file, "音声ファイル");
   audioInput.value = "";
-});
-
-videoInput.addEventListener("change", async (event) => {
-  const file = event.target.files && event.target.files[0];
-  await handleFileLoad(file, "動画ファイル");
-  videoInput.value = "";
-});
-
-anyFileInput.addEventListener("change", async (event) => {
-  const file = event.target.files && event.target.files[0];
-  await handleFileLoad(file, "任意ファイル");
-  anyFileInput.value = "";
 });
 
 playBtn.addEventListener("click", async () => {
@@ -1545,8 +1714,28 @@ forwardBtn.addEventListener("click", () => {
   skipBy(10);
 });
 
+loopToggleBtn.addEventListener("click", () => {
+  toggleLoop();
+});
+
+editLoopToggleBtn.addEventListener("click", () => {
+  toggleLoop();
+});
+
 playSelectionBtn.addEventListener("click", async () => {
   await playSelection();
+});
+
+editPlayBtn.addEventListener("click", async () => {
+  await playEditRange();
+});
+
+editPauseBtn.addEventListener("click", () => {
+  pausePlayback();
+});
+
+editStopBtn.addEventListener("click", () => {
+  stopPlayback(false);
 });
 
 scrollLeftBtn.addEventListener("click", () => {
