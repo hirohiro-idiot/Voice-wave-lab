@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.7
-// 音声専用 / 精密表示 / 元波形オーバーレイ / A/B/重ね表示
+// Wave Voice Lab v4.8
+// 音声専用 / 精密表示 / 元波形オーバーレイ / 連続区間・瞬時イベント解析
 // =====================================================
 
 // ------------------------------
@@ -47,6 +47,11 @@ const scrollRightBtn = document.getElementById("scrollRightBtn");
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
 const fullViewBtn = document.getElementById("fullViewBtn");
+
+const analyzeSelectionBtn = document.getElementById("analyzeSelectionBtn");
+const playContinuousBtn = document.getElementById("playContinuousBtn");
+const playTransientBtn = document.getElementById("playTransientBtn");
+const clearAnalysisBtn = document.getElementById("clearAnalysisBtn");
 
 const editorPanel = document.getElementById("editorPanel");
 const editorRangeInfo = document.getElementById("editorRangeInfo");
@@ -133,6 +138,14 @@ let lastTapTime = 0;
 let lastTapX = 0;
 
 // ------------------------------
+// Analysis state
+// ------------------------------
+let analysisState = {
+  continuousRegions: [],
+  transientEvents: [],
+};
+
+// ------------------------------
 // Edit mode state
 // ------------------------------
 let isEditMode = false;
@@ -166,7 +179,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v47";
+const DB_NAME = "wave_voice_lab_db_v48";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -430,6 +443,158 @@ function channelArraysToAudioBuffer(data) {
 }
 
 // ------------------------------
+// Analysis helpers
+// ------------------------------
+function computeEnergy(data, start, end) {
+  let sum = 0;
+  for (let i = start; i < end; i++) {
+    const v = data[i];
+    sum += v * v;
+  }
+  return sum / Math.max(1, end - start);
+}
+
+function computeZeroCrossRate(data, start, end) {
+  let count = 0;
+  for (let i = start + 1; i < end; i++) {
+    if ((data[i - 1] >= 0 && data[i] < 0) || (data[i - 1] < 0 && data[i] >= 0)) {
+      count++;
+    }
+  }
+  return count / Math.max(1, end - start);
+}
+
+function computeAutocorrPeak(data, start, end, minLag, maxLag) {
+  let best = 0;
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let sum = 0;
+    let normA = 0;
+    let normB = 0;
+
+    for (let i = start; i < end - lag; i++) {
+      const a = data[i];
+      const b = data[i + lag];
+      sum += a * b;
+      normA += a * a;
+      normB += b * b;
+    }
+
+    const denom = Math.sqrt(normA * normB) || 1e-9;
+    const corr = sum / denom;
+    if (corr > best) best = corr;
+  }
+
+  return best;
+}
+
+function analyzeSelectedRegion() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+
+  const data = editedAudioBuffer.getChannelData(0);
+  const sampleRate = editedAudioBuffer.sampleRate;
+  const startSample = Math.min(selectionStart, selectionEnd);
+  const endSample = Math.max(selectionStart, selectionEnd);
+
+  analysisState.continuousRegions = [];
+  analysisState.transientEvents = [];
+
+  const winSize = Math.max(32, Math.floor(sampleRate * 0.02));
+  const hopSize = Math.max(16, Math.floor(sampleRate * 0.01));
+
+  const minLag = Math.max(1, Math.floor(sampleRate / 400));
+  const maxLag = Math.max(minLag + 1, Math.floor(sampleRate / 70));
+
+  const frames = [];
+
+  for (let s = startSample; s + winSize < endSample; s += hopSize) {
+    const e = s + winSize;
+    const energy = computeEnergy(data, s, e);
+    const zcr = computeZeroCrossRate(data, s, e);
+    const periodicity = computeAutocorrPeak(data, s, e, minLag, maxLag);
+
+    frames.push({
+      start: s,
+      end: e,
+      energy,
+      zcr,
+      periodicity,
+    });
+  }
+
+  if (!frames.length) {
+    updateAnalysisButtons();
+    drawMainWaveform();
+    return;
+  }
+
+  const avgEnergy = frames.reduce((a, f) => a + f.energy, 0) / frames.length;
+  const avgZcr = frames.reduce((a, f) => a + f.zcr, 0) / frames.length;
+
+  let currentRegion = null;
+
+  for (const f of frames) {
+    const isContinuous =
+      f.energy > avgEnergy * 0.35 &&
+      f.periodicity > 0.45 &&
+      f.zcr < avgZcr * 1.3;
+
+    if (isContinuous) {
+      if (!currentRegion) {
+        currentRegion = { startSample: f.start, endSample: f.end };
+      } else {
+        currentRegion.endSample = f.end;
+      }
+    } else {
+      if (currentRegion && currentRegion.endSample - currentRegion.startSample > winSize * 1.5) {
+        analysisState.continuousRegions.push(currentRegion);
+      }
+      currentRegion = null;
+    }
+  }
+
+  if (currentRegion && currentRegion.endSample - currentRegion.startSample > winSize * 1.5) {
+    analysisState.continuousRegions.push(currentRegion);
+  }
+
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const cur = frames[i];
+
+    const energyRise = cur.energy / Math.max(prev.energy, 1e-9);
+    const zcrJump = Math.abs(cur.zcr - prev.zcr);
+
+    if (energyRise > 1.8 || zcrJump > avgZcr * 0.35) {
+      analysisState.transientEvents.push({
+        sample: cur.start,
+      });
+    }
+  }
+
+  updateAnalysisButtons();
+  drawMainWaveform();
+  setStatus("選択範囲を解析しました");
+}
+
+function clearAnalysis() {
+  analysisState.continuousRegions = [];
+  analysisState.transientEvents = [];
+  updateAnalysisButtons();
+  drawMainWaveform();
+  setStatus("解析表示を消しました");
+}
+
+function updateAnalysisButtons() {
+  const hasContinuous = analysisState.continuousRegions.length > 0;
+  const hasTransient = analysisState.transientEvents.length > 0;
+  const hasAny = hasContinuous || hasTransient;
+
+  playContinuousBtn.disabled = !hasContinuous;
+  playTransientBtn.disabled = !hasTransient;
+  clearAnalysisBtn.disabled = !hasAny;
+}
+
+// ------------------------------
 // Loading audio
 // ------------------------------
 async function decodeFileToAudioBuffer(file) {
@@ -459,6 +624,7 @@ function loadDecodedBuffer(decoded, label = "読込完了", source = "") {
   currentMaterialName = currentMaterialName || label;
   saveNameInput.value = currentMaterialName;
 
+  clearAnalysis();
   resetView();
   resetSelectionDefault();
   stopPlayback();
@@ -799,6 +965,33 @@ async function playEditRange() {
   await startPlaybackFrom(start, "edit");
 }
 
+async function playContinuousRegions() {
+  if (!editedAudioBuffer || !analysisState.continuousRegions.length) return;
+
+  const first = analysisState.continuousRegions[0];
+  const startSec = first.startSample / editedAudioBuffer.sampleRate;
+  const endSec = first.endSample / editedAudioBuffer.sampleRate;
+
+  playerState.lastMode = "full";
+  await startPlaybackFrom(startSec, "full");
+  playerState.playEndSec = endSec;
+  setStatus("連続区間を再生中");
+}
+
+async function playTransientEvents() {
+  if (!editedAudioBuffer || !analysisState.transientEvents.length) return;
+
+  const ev = analysisState.transientEvents[0];
+  const centerSec = ev.sample / editedAudioBuffer.sampleRate;
+  const startSec = Math.max(0, centerSec - 0.03);
+  const endSec = Math.min(editedAudioBuffer.duration, centerSec + 0.05);
+
+  playerState.lastMode = "full";
+  await startPlaybackFrom(startSec, "full");
+  playerState.playEndSec = endSec;
+  setStatus("瞬時イベントを再生中");
+}
+
 function seekTo(sec) {
   if (!editedAudioBuffer) return;
 
@@ -1112,6 +1305,19 @@ function drawPreciseLine(ctx, data, startSample, endSample, width, height, strok
   }
 
   ctx.stroke();
+
+  if (range <= 300) {
+    ctx.fillStyle = strokeStyle;
+    for (let i = startSample; i <= endSample; i++) {
+      const ratioX = (i - startSample) / Math.max(1, range);
+      const x = ratioX * width;
+      const y = ((1 - data[i]) * 0.5) * height;
+
+      ctx.beginPath();
+      ctx.arc(x, y, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
 }
 
 function drawEditWaveBackground() {
@@ -1187,6 +1393,35 @@ function drawMainWaveform() {
     mainCtx.fillRect(x2 - 6, 0, 12, 20);
   }
 
+  if (editedAudioBuffer && analysisState.continuousRegions.length) {
+    for (const region of analysisState.continuousRegions) {
+      if (region.endSample < viewStart || region.startSample > viewEnd) continue;
+
+      const rs = Math.max(region.startSample, viewStart);
+      const re = Math.min(region.endSample, viewEnd);
+
+      const x1 = sampleToMainCanvasX(rs);
+      const x2 = sampleToMainCanvasX(re);
+
+      mainCtx.fillStyle = "rgba(40, 180, 80, 0.18)";
+      mainCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
+    }
+  }
+
+  if (editedAudioBuffer && analysisState.transientEvents.length) {
+    for (const ev of analysisState.transientEvents) {
+      if (ev.sample < viewStart || ev.sample > viewEnd) continue;
+
+      const x = sampleToMainCanvasX(ev.sample);
+      mainCtx.strokeStyle = "rgba(255, 140, 0, 0.95)";
+      mainCtx.lineWidth = 2;
+      mainCtx.beginPath();
+      mainCtx.moveTo(x, 0);
+      mainCtx.lineTo(x, height);
+      mainCtx.stroke();
+    }
+  }
+
   if (editedAudioBuffer && currentPlayheadSample != null) {
     if (currentPlayheadSample >= viewStart && currentPlayheadSample <= viewEnd) {
       const x = sampleToMainCanvasX(currentPlayheadSample);
@@ -1226,7 +1461,6 @@ function drawEditWaveform() {
       editCtx.globalAlpha = editSession.overlayMode === "overlay" ? 0.85 : 1.0;
       drawWaveformToCanvas(editCtx, editCanvas, originalAudioBuffer, start, end);
       editCtx.restore();
-
       drawEditWaveBackground();
     }
 
@@ -1563,6 +1797,7 @@ async function loadMaterialFromDB(id) {
     saveNameInput.value = currentMaterialName;
     fileInfoEl.textContent = `ライブラリ: ${item.name}`;
 
+    clearAnalysis();
     resetView();
     resetSelectionDefault();
     stopPlayback();
@@ -1769,6 +2004,8 @@ function updateMainUIState() {
   resetSelectionBtn.disabled = !hasSelection;
   openEditorBtn.disabled = !hasSelection;
 
+  analyzeSelectionBtn.disabled = !hasSelection;
+
   saveCurrentBtn.disabled = !hasAudio;
   saveEditedAsBtn.disabled = !hasAudio;
   saveWavBtn.disabled = !hasAudio;
@@ -1800,6 +2037,7 @@ function updateMainUIState() {
   updatePlaybackInfoText();
   updatePrecisionButton();
   updateOverlayButton();
+  updateAnalysisButtons();
 }
 
 // ------------------------------
@@ -2172,6 +2410,22 @@ playSelectionBtn.addEventListener("click", async () => {
 
 saveSelectionWavBtn.addEventListener("click", () => {
   exportSelectionWav();
+});
+
+analyzeSelectionBtn.addEventListener("click", () => {
+  analyzeSelectedRegion();
+});
+
+playContinuousBtn.addEventListener("click", async () => {
+  await playContinuousRegions();
+});
+
+playTransientBtn.addEventListener("click", async () => {
+  await playTransientEvents();
+});
+
+clearAnalysisBtn.addEventListener("click", () => {
+  clearAnalysis();
 });
 
 editPlayBtn.addEventListener("click", async () => {
