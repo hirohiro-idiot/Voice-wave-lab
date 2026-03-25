@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.5
-// 音声専用 / 高拡大 / 選択範囲保存 / 編集画面ナビ/編集切替
+// Wave Voice Lab v4.6
+// 音声専用 / 超拡大 / 選択範囲保存 / 編集画面ナビ/編集切替修正版
 // =====================================================
 
 // ------------------------------
@@ -146,6 +146,7 @@ let editSession = {
 let isEditPointerDown = false;
 let editLastX = null;
 let editLastY = null;
+
 let editPointerState = new Map();
 let editPinchStartDistance = 0;
 let editPanLastCenterX = 0;
@@ -160,7 +161,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v45";
+const DB_NAME = "wave_voice_lab_db_v46";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -308,9 +309,17 @@ function updatePlaybackInfoText() {
     `再生対象: ${modeLabel} / ループ: ${playerState.loopEnabled ? "ON" : "OFF"} / 速度: ${playerState.playbackRate.toFixed(2)}x`;
 }
 
-function updateEditModeButton() {
-  editModeToggleBtn.textContent =
-    editSession.interactionMode === "navigate" ? "表示操作モード" : "編集操作モード";
+function setEditInteractionMode(mode) {
+  editSession.interactionMode = mode;
+
+  if (mode === "navigate") {
+    editModeToggleBtn.textContent = "表示操作中（タップで編集操作へ）";
+  } else {
+    editModeToggleBtn.textContent = "編集操作中（タップで表示操作へ）";
+  }
+
+  isEditPointerDown = false;
+  editPointerState.clear();
 }
 
 brushSizeInput.addEventListener("input", updateBrushLabels);
@@ -888,7 +897,7 @@ function zoomView(factor, centerSample = null) {
   const center = centerSample == null ? viewStart + currentLength / 2 : centerSample;
   let newLength = Math.floor(currentLength * factor);
 
-  const minLength = 80;
+  const minLength = 8;
   const maxLength = editedAudioBuffer.length;
   newLength = clamp(newLength, minLength, maxLength);
 
@@ -917,7 +926,7 @@ function zoomToSelection() {
 
   const s = Math.min(selectionStart, selectionEnd);
   const e = Math.max(selectionStart, selectionEnd);
-  if (e - s < 10) return;
+  if (e - s < 2) return;
 
   viewStart = s;
   viewEnd = e;
@@ -947,7 +956,7 @@ function zoomEditView(factor, centerSample = null) {
     : centerSample;
 
   let newLength = Math.floor(currentLength * factor);
-  newLength = clamp(newLength, 20, absoluteEnd - absoluteStart);
+  newLength = clamp(newLength, 8, absoluteEnd - absoluteStart);
 
   let newStart = Math.floor(center - newLength / 2);
   let newEnd = Math.floor(center + newLength / 2);
@@ -1159,7 +1168,7 @@ function openEditMode() {
   const s = Math.min(selectionStart, selectionEnd);
   const e = Math.max(selectionStart, selectionEnd);
 
-  if (e - s < 10) {
+  if (e - s < 2) {
     alert("編集範囲が短すぎます。");
     return;
   }
@@ -1168,16 +1177,15 @@ function openEditMode() {
   editSession.endSample = e;
   editSession.viewStartSample = s;
   editSession.viewEndSample = e;
-  editSession.interactionMode = "navigate";
   editSession.snapshotBeforeEdit = cloneAudioBuffer(editedAudioBuffer);
   editSession.historyStack = [];
 
   isEditMode = true;
   editorPanel.classList.remove("hidden");
   playerState.lastMode = "edit";
+  setEditInteractionMode("navigate");
   updateEditorInfo();
   updatePlaybackInfoText();
-  updateEditModeButton();
   undoBtn.disabled = true;
   drawEditWaveform();
   setStatus("編集モード");
@@ -1192,7 +1200,6 @@ function cancelEditMode() {
   editSession.endSample = null;
   editSession.viewStartSample = null;
   editSession.viewEndSample = null;
-  editSession.interactionMode = "navigate";
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
@@ -1200,6 +1207,7 @@ function cancelEditMode() {
   editorPanel.classList.add("hidden");
   undoBtn.disabled = true;
   playerState.lastMode = "selection";
+  setEditInteractionMode("navigate");
   updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
@@ -1211,7 +1219,6 @@ function applyEditMode() {
   editSession.endSample = null;
   editSession.viewStartSample = null;
   editSession.viewEndSample = null;
-  editSession.interactionMode = "navigate";
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
@@ -1219,6 +1226,7 @@ function applyEditMode() {
   editorPanel.classList.add("hidden");
   undoBtn.disabled = true;
   playerState.lastMode = "selection";
+  setEditInteractionMode("navigate");
   updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
@@ -1414,9 +1422,9 @@ async function loadMaterialFromDB(id) {
     editSession.endSample = null;
     editSession.viewStartSample = null;
     editSession.viewEndSample = null;
-    editSession.interactionMode = "navigate";
     editSession.historyStack = [];
     editSession.snapshotBeforeEdit = null;
+    setEditInteractionMode("navigate");
     drawMainWaveform();
     drawEditWaveform();
     updateMainUIState();
@@ -1634,7 +1642,6 @@ function updateMainUIState() {
   loopToggleBtn.textContent = label;
   editLoopToggleBtn.textContent = label;
   updatePlaybackInfoText();
-  updateEditModeButton();
 }
 
 // ------------------------------
@@ -1749,7 +1756,7 @@ mainCanvas.addEventListener("pointermove", (event) => {
     if (pinchStartDistance > 0 && dist > 0) {
       const startLen = pinchStartViewEnd - pinchStartViewStart;
       let newLen = Math.floor(startLen * (pinchStartDistance / dist));
-      newLen = clamp(newLen, 80, editedAudioBuffer.length);
+      newLen = clamp(newLen, 8, editedAudioBuffer.length);
 
       const centerRatio = clamp(centerX / Math.max(1, mainCanvas.clientWidth), 0, 1);
       const anchorSample = Math.floor(pinchStartViewStart + centerRatio * startLen);
@@ -1829,14 +1836,16 @@ editCanvas.addEventListener("pointerdown", async (event) => {
     applyEditToolAt(pos.x, pos.y);
     drawEditWaveform();
     drawMainWaveform();
-  } else {
-    if (pointers.length === 1) {
-      editPanLastCenterX = pos.x;
-    } else if (pointers.length === 2) {
-      editPinchStartDistance = distanceBetweenTouches(pointers);
-      editPinchStartViewStart = editSession.viewStartSample;
-      editPinchStartViewEnd = editSession.viewEndSample;
-    }
+    return;
+  }
+
+  // navigate
+  if (pointers.length === 1) {
+    editPanLastCenterX = pos.x;
+  } else if (pointers.length === 2) {
+    editPinchStartDistance = distanceBetweenTouches(pointers);
+    editPinchStartViewStart = editSession.viewStartSample;
+    editPinchStartViewEnd = editSession.viewEndSample;
   }
 });
 
@@ -1903,7 +1912,7 @@ editCanvas.addEventListener("pointermove", (event) => {
     if (editPinchStartDistance > 0 && dist > 0) {
       const startLen = editPinchStartViewEnd - editPinchStartViewStart;
       let newLen = Math.floor(startLen * (editPinchStartDistance / dist));
-      newLen = clamp(newLen, 20, editSession.endSample - editSession.startSample);
+      newLen = clamp(newLen, 8, editSession.endSample - editSession.startSample);
 
       const centerRatio = clamp(centerX / Math.max(1, editCanvas.clientWidth), 0, 1);
       const anchorSample = Math.floor(editPinchStartViewStart + centerRatio * startLen);
@@ -2059,9 +2068,11 @@ openEditorBtn.addEventListener("click", () => {
 });
 
 editModeToggleBtn.addEventListener("click", () => {
-  editSession.interactionMode =
-    editSession.interactionMode === "navigate" ? "draw" : "navigate";
-  updateEditModeButton();
+  if (editSession.interactionMode === "navigate") {
+    setEditInteractionMode("draw");
+  } else {
+    setEditInteractionMode("navigate");
+  }
 });
 
 editZoomInBtn.addEventListener("click", () => {
@@ -2138,6 +2149,7 @@ libraryList.addEventListener("click", async (event) => {
 // ------------------------------
 function init() {
   bootStatus();
+  setEditInteractionMode("navigate");
   updateMainUIState();
   drawMainWaveform();
   drawEditWaveform();
