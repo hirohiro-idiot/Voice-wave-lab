@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wave Voice Lab v4.8</title>
+  <title>Wave Voice Lab v4.9</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <h1>Wave Voice Lab v4.8</h1>
-      <p class="subtitle">精密表示・元波形オーバーレイ・連続区間/瞬時イベント解析対応</p>
+      <h1>Wave Voice Lab v4.9</h1>
+      <p class="subtitle">精密表示・元波形オーバーレイ・周期単位抽出対応</p>
     </header>
 
     <main class="main">
@@ -112,17 +112,9 @@
           <button id="openEditorBtn" disabled>選択範囲を編集</button>
         </div>
 
-        <div class="row controls-row">
-          <button id="analyzeSelectionBtn" disabled>選択範囲を解析</button>
-          <button id="playContinuousBtn" disabled>連続区間を再生</button>
-          <button id="playTransientBtn" disabled>瞬時イベントを再生</button>
-          <button id="clearAnalysisBtn" disabled>解析表示を消す</button>
-        </div>
-
         <p class="hint">
           青い縦バーが編集始点と終点です。バーをドラッグして範囲を調整できます。<br>
-          1本指ドラッグで横スクロール、2本指ピンチで拡大縮小できます。<br>
-          緑帯は連続区間候補、オレンジ線は瞬時イベント候補です。
+          1本指ドラッグで横スクロール、2本指ピンチで拡大縮小できます。
         </p>
       </section>
 
@@ -157,6 +149,13 @@
           <button id="overlayModeBtn">表示: 重ね</button>
         </div>
 
+        <div class="row controls-row">
+          <button id="analyzeSelectionBtn">この編集範囲を解析</button>
+          <button id="playContinuousBtn" disabled>連続区間を再生</button>
+          <button id="playTransientBtn" disabled>瞬時イベントを再生</button>
+          <button id="clearAnalysisBtn" disabled>解析表示を消す</button>
+        </div>
+
         <div class="editor-row">
           <label for="toolSelect">編集ツール</label>
           <select id="toolSelect">
@@ -185,10 +184,27 @@
           <button id="applyEditBtn">編集確定</button>
           <button id="saveWavBtn" disabled>WAV保存</button>
         </div>
+
+        <div class="row small-row">
+          <span id="unitInfoText">単位波形: なし</span>
+        </div>
+
+        <div class="row controls-row">
+          <button id="playUnitBtn" disabled>単位波形を再生</button>
+        </div>
+
+        <div class="canvas-wrap unit-canvas-wrap">
+          <canvas id="unitWaveCanvas"></canvas>
+        </div>
+
+        <p class="hint">
+          緑帯は連続区間候補、緑の縦線はその境界、オレンジ線は瞬時イベント候補です。<br>
+          表示操作モードで解析結果をタップすると、連続区間では1周期、瞬時区間では短時間イベントを下に表示します。
+        </p>
       </section>
     </main>
   </div>
 
-  <script src="script.js?v=48"></script>
+  <script src="script.js?v=49"></script>
 </body>
 </html>
