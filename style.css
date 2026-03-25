@@ -241,14 +241,25 @@ canvas {
   display: none;
 }
 
-.hidden-file-input {
+.file-picker-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  border-radius: 12px;
+  padding: 12px 16px;
+  background: #111;
+  color: #fff;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.file-picker-button input[type="file"] {
   position: absolute;
-  left: -9999px;
-  top: 0;
-  width: 1px;
-  height: 1px;
+  inset: 0;
   opacity: 0.001;
-  pointer-events: none;
+  cursor: pointer;
 }
 
 @media (max-width: 640px) {
@@ -260,7 +271,8 @@ canvas {
     height: 220px;
   }
 
-  button {
+  button,
+  .file-picker-button {
     flex: 1 1 calc(50% - 8px);
   }
 
