@@ -3,28 +3,40 @@ const timeInfoEl = document.getElementById("timeInfo");
 const fileInfoEl = document.getElementById("fileInfo");
 const viewInfoEl = document.getElementById("viewInfo");
 const selectionInfoEl = document.getElementById("selectionInfo");
+const playbackModeInfoEl = document.getElementById("playbackModeInfo");
+const playbackTimeInfoEl = document.getElementById("playbackTimeInfo");
 
 const recordBtn = document.getElementById("recordBtn");
 const audioInput = document.getElementById("audioInput");
 const videoInput = document.getElementById("videoInput");
 const anyFileInput = document.getElementById("anyFileInput");
 
+const saveNameInput = document.getElementById("saveNameInput");
+const saveCurrentBtn = document.getElementById("saveCurrentBtn");
+const saveEditedAsBtn = document.getElementById("saveEditedAsBtn");
+const refreshLibraryBtn = document.getElementById("refreshLibraryBtn");
+const libraryList = document.getElementById("libraryList");
+
 const playOriginalBtn = document.getElementById("playOriginalBtn");
 const playEditedBtn = document.getElementById("playEditedBtn");
+const playSelectionBtn = document.getElementById("playSelectionBtn");
 const stopBtn = document.getElementById("stopBtn");
-const undoBtn = document.getElementById("undoBtn");
-const resetBtn = document.getElementById("resetBtn");
-const saveBtn = document.getElementById("saveBtn");
+
+const scrollLeftBtn = document.getElementById("scrollLeftBtn");
+const scrollRightBtn = document.getElementById("scrollRightBtn");
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
+const zoomToSelectionBtn = document.getElementById("zoomToSelectionBtn");
 const fullViewBtn = document.getElementById("fullViewBtn");
-const playSelectionBtn = document.getElementById("playSelectionBtn");
 
 const toolSelect = document.getElementById("toolSelect");
 const brushSizeInput = document.getElementById("brushSize");
 const strengthInput = document.getElementById("strength");
 const brushSizeValue = document.getElementById("brushSizeValue");
 const strengthValue = document.getElementById("strengthValue");
+const undoBtn = document.getElementById("undoBtn");
+const resetBtn = document.getElementById("resetBtn");
+const saveWavBtn = document.getElementById("saveWavBtn");
 
 const canvas = document.getElementById("waveCanvas");
 const ctx = canvas.getContext("2d");
@@ -40,6 +52,8 @@ let currentSourceNode = null;
 let originalAudioBuffer = null;
 let editedAudioBuffer = null;
 let historyStack = [];
+let currentMaterialName = "";
+let currentMaterialSource = "";
 
 let viewStart = 0;
 let viewEnd = 0;
@@ -51,8 +65,86 @@ let isPointerDown = false;
 let lastPointerX = null;
 let lastPointerY = null;
 
+let playbackAnimationFrame = null;
+let playbackStartTime = 0;
+let playbackOffsetSec = 0;
+let playbackEndSec = 0;
+let playbackMode = "none";
+let currentPlayheadSample = null;
+
 let dpr = Math.max(1, window.devicePixelRatio || 1);
 
+// ------------------------------
+// IndexedDB
+// ------------------------------
+const DB_NAME = "wave_voice_lab_db";
+const DB_VERSION = 1;
+const STORE_NAME = "materials";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
+        store.createIndex("updatedAt", "updatedAt", { unique: false });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function dbPutMaterial(material) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).put(material);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbGetAllMaterials() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const request = tx.objectStore(STORE_NAME).getAll();
+    request.onsuccess = () => {
+      const items = request.result || [];
+      items.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      resolve(items);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function dbGetMaterial(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const request = tx.objectStore(STORE_NAME).get(id);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function dbDeleteMaterial(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ------------------------------
+// General
+// ------------------------------
 function setStatus(msg) {
   statusEl.textContent = msg;
 }
@@ -83,48 +175,52 @@ function resizeCanvas() {
 window.addEventListener("resize", resizeCanvas);
 setTimeout(resizeCanvas, 50);
 
-function stopCurrentPlayback() {
-  if (currentSourceNode) {
-    try {
-      currentSourceNode.stop();
-    } catch (e) {}
-    currentSourceNode = null;
-  }
-  setStatus("停止");
+function enableEditingButtons(enabled) {
+  playOriginalBtn.disabled = !enabled;
+  playEditedBtn.disabled = !enabled;
+  stopBtn.disabled = !enabled;
+  resetBtn.disabled = !enabled;
+  saveWavBtn.disabled = !enabled;
+  zoomInBtn.disabled = !enabled;
+  zoomOutBtn.disabled = !enabled;
+  fullViewBtn.disabled = !enabled;
+  scrollLeftBtn.disabled = !enabled;
+  scrollRightBtn.disabled = !enabled;
+  saveCurrentBtn.disabled = !enabled;
+  saveEditedAsBtn.disabled = !enabled;
+  undoBtn.disabled = historyStack.length === 0 || !enabled;
+  updateSelectionDependentButtons();
 }
 
-async function playAudioBuffer(buffer, startSec = 0, endSec = null) {
-  if (!buffer) return;
-
-  ensureAudioContext();
-  stopCurrentPlayback();
-
-  if (audioContext.state === "suspended") {
-    await audioContext.resume();
-  }
-
-  const source = audioContext.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioContext.destination);
-  currentSourceNode = source;
-
-  const duration = buffer.duration;
-  const clampedStart = Math.max(0, Math.min(startSec, duration));
-  const clampedEnd = endSec == null ? duration : Math.max(clampedStart, Math.min(endSec, duration));
-  const playDuration = Math.max(0, clampedEnd - clampedStart);
-
-  setStatus("再生中...");
-
-  source.onended = () => {
-    if (currentSourceNode === source) {
-      currentSourceNode = null;
-      setStatus("再生終了");
-    }
-  };
-
-  source.start(0, clampedStart, playDuration);
+function updateSelectionDependentButtons() {
+  const hasSel = selectionStart != null && selectionEnd != null && editedAudioBuffer;
+  playSelectionBtn.disabled = !hasSel;
+  zoomToSelectionBtn.disabled = !hasSel;
 }
 
+function clampSample(v) {
+  return Math.max(-1, Math.min(1, v));
+}
+
+function getFileExtension(name) {
+  const idx = name.lastIndexOf(".");
+  if (idx === -1) return "";
+  return name.slice(idx).toLowerCase();
+}
+
+function formatDate(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts);
+  return d.toLocaleString();
+}
+
+function generateId() {
+  return `mat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// ------------------------------
+// AudioBuffer conversion
+// ------------------------------
 function toMonoBuffer(buffer) {
   const mono = audioContext.createBuffer(1, buffer.length, buffer.sampleRate);
   const monoData = mono.getChannelData(0);
@@ -165,131 +261,80 @@ function pushHistory() {
   undoBtn.disabled = historyStack.length === 0;
 }
 
-function clampSample(v) {
-  return Math.max(-1, Math.min(1, v));
-}
-
-function clearSelection() {
-  selectionStart = null;
-  selectionEnd = null;
-  selectionInfoEl.textContent = "選択範囲: なし";
-  playSelectionBtn.disabled = true;
-}
-
-function updateSelectionInfo() {
-  if (selectionStart == null || selectionEnd == null || !editedAudioBuffer) {
-    selectionInfoEl.textContent = "選択範囲: なし";
-    playSelectionBtn.disabled = true;
-    return;
+function audioBufferToChannelArrays(buffer) {
+  const channels = [];
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    channels.push(Array.from(buffer.getChannelData(ch)));
   }
-
-  const s = Math.min(selectionStart, selectionEnd);
-  const e = Math.max(selectionStart, selectionEnd);
-  const startSec = (s / editedAudioBuffer.sampleRate).toFixed(2);
-  const endSec = (e / editedAudioBuffer.sampleRate).toFixed(2);
-
-  selectionInfoEl.textContent = `選択範囲: ${startSec}s ～ ${endSec}s`;
-  playSelectionBtn.disabled = false;
+  return {
+    sampleRate: buffer.sampleRate,
+    numberOfChannels: buffer.numberOfChannels,
+    length: buffer.length,
+    channels
+  };
 }
 
-function resetView() {
-  if (!editedAudioBuffer) return;
-  viewStart = 0;
-  viewEnd = editedAudioBuffer.length;
-  updateViewInfo();
-}
+function channelArraysToAudioBuffer(data) {
+  ensureAudioContext();
+  const buffer = audioContext.createBuffer(
+    data.numberOfChannels,
+    data.length,
+    data.sampleRate
+  );
 
-function updateViewInfo() {
-  if (!editedAudioBuffer) {
-    viewInfoEl.textContent = "表示範囲: なし";
-    return;
+  for (let ch = 0; ch < data.numberOfChannels; ch++) {
+    buffer.getChannelData(ch).set(new Float32Array(data.channels[ch]));
   }
-
-  const total = editedAudioBuffer.length;
-  const startRatio = ((viewStart / total) * 100).toFixed(1);
-  const endRatio = ((viewEnd / total) * 100).toFixed(1);
-  viewInfoEl.textContent = `表示範囲: ${startRatio}% ～ ${endRatio}%`;
+  return buffer;
 }
 
-function enableEditingButtons(enabled) {
-  playOriginalBtn.disabled = !enabled;
-  playEditedBtn.disabled = !enabled;
-  stopBtn.disabled = !enabled;
-  resetBtn.disabled = !enabled;
-  saveBtn.disabled = !enabled;
-  zoomInBtn.disabled = !enabled;
-  zoomOutBtn.disabled = !enabled;
-  fullViewBtn.disabled = !enabled;
-  undoBtn.disabled = historyStack.length === 0 || !enabled;
-}
-
-function loadDecodedBuffer(decoded, label = "読込完了") {
+// ------------------------------
+// Loading / recording
+// ------------------------------
+function loadDecodedBuffer(decoded, label = "読込完了", source = "") {
   originalAudioBuffer = toMonoBuffer(decoded);
   editedAudioBuffer = cloneAudioBuffer(originalAudioBuffer);
   historyStack = [];
+  currentMaterialSource = source;
   clearSelection();
   resetView();
   enableEditingButtons(true);
   drawWaveform();
   setStatus(label);
-}
-
-function getFileExtension(name) {
-  const idx = name.lastIndexOf(".");
-  if (idx === -1) return "";
-  return name.slice(idx).toLowerCase();
-}
-
-function isLikelyAudioFile(file) {
-  const ext = getFileExtension(file.name);
-  const audioExts = [".wav", ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".flac", ".aif", ".aiff"];
-  return (file.type && file.type.startsWith("audio/")) || audioExts.includes(ext);
-}
-
-function isLikelyVideoFile(file) {
-  const ext = getFileExtension(file.name);
-  const videoExts = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
-  return (file.type && file.type.startsWith("video/")) || videoExts.includes(ext);
+  if (!currentMaterialName) {
+    currentMaterialName = label;
+    saveNameInput.value = label;
+  }
 }
 
 async function decodeFileToAudioBuffer(file) {
   ensureAudioContext();
   const arrayBuffer = await file.arrayBuffer();
-
-  try {
-    const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-    return decoded;
-  } catch (err) {
-    throw new Error("ブラウザでデコードできない形式です");
-  }
+  const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+  return decoded;
 }
 
 async function handleFileLoad(file, sourceLabel = "ファイル") {
   if (!file) return;
 
-  const ext = getFileExtension(file.name);
-  const typeLabel = file.type || "type不明";
-
-  fileInfoEl.textContent = `${sourceLabel}: ${file.name} / ${typeLabel || ext || "不明"}`;
+  currentMaterialName = file.name;
+  saveNameInput.value = file.name;
+  fileInfoEl.textContent = `${sourceLabel}: ${file.name} / ${file.type || "type不明"}`;
   setStatus("ファイル読込中...");
-
-  if (!isLikelyAudioFile(file) && !isLikelyVideoFile(file)) {
-    setStatus("非対応の可能性があります");
-  }
 
   try {
     const decoded = await decodeFileToAudioBuffer(file);
-    loadDecodedBuffer(decoded, `${sourceLabel}読込完了`);
+    loadDecodedBuffer(decoded, `${sourceLabel}読込完了`, sourceLabel);
   } catch (err) {
     console.error(err);
     setStatus("ファイル読込失敗");
     alert(
       "読み込みに失敗しました。\n\n" +
       "試してほしいこと:\n" +
-      "1. まず『なんでも選択』から選ぶ\n" +
-      "2. 音声は mp3 / wav / m4a を試す\n" +
-      "3. 動画は mp4 を試す\n" +
-      "4. その動画に音声トラックが入っているか確認する"
+      "1. なんでも選択から選ぶ\n" +
+      "2. 音声は mp3 / wav / m4a\n" +
+      "3. 動画は mp4\n" +
+      "4. 動画に音声トラックが入っているか確認"
     );
   }
 }
@@ -313,8 +358,11 @@ async function startRecording() {
         const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
         const fileLike = new File([blob], "recorded_audio.webm", { type: blob.type });
         const decoded = await decodeFileToAudioBuffer(fileLike);
+
+        currentMaterialName = `record_${new Date().toISOString().replace(/[:.]/g, "-")}`;
+        saveNameInput.value = currentMaterialName;
         fileInfoEl.textContent = "マイク録音データ";
-        loadDecodedBuffer(decoded, "録音完了");
+        loadDecodedBuffer(decoded, "録音完了", "録音");
       } catch (err) {
         console.error(err);
         setStatus("録音データの解析に失敗");
@@ -360,6 +408,230 @@ function updateRecordingTime() {
   timeInfoEl.textContent = `録音時間: ${sec.toFixed(1)} 秒`;
 }
 
+// ------------------------------
+// Playback
+// ------------------------------
+function stopPlaybackAnimation() {
+  if (playbackAnimationFrame) {
+    cancelAnimationFrame(playbackAnimationFrame);
+    playbackAnimationFrame = null;
+  }
+  currentPlayheadSample = null;
+  playbackMode = "none";
+  playbackModeInfoEl.textContent = "再生対象: なし";
+  playbackTimeInfoEl.textContent = "再生位置: -";
+}
+
+function stopCurrentPlayback() {
+  if (currentSourceNode) {
+    try {
+      currentSourceNode.stop();
+    } catch (e) {}
+    currentSourceNode = null;
+  }
+  stopPlaybackAnimation();
+  drawWaveform();
+  setStatus("停止");
+}
+
+function startPlaybackAnimation(buffer, startSec, endSec, modeLabel) {
+  playbackStartTime = performance.now();
+  playbackOffsetSec = startSec;
+  playbackEndSec = endSec;
+  playbackMode = modeLabel;
+  playbackModeInfoEl.textContent = `再生対象: ${modeLabel}`;
+
+  const sampleRate = buffer.sampleRate;
+
+  function tick() {
+    const elapsed = (performance.now() - playbackStartTime) / 1000;
+    const currentSec = Math.min(playbackOffsetSec + elapsed, playbackEndSec);
+    currentPlayheadSample = Math.floor(currentSec * sampleRate);
+    playbackTimeInfoEl.textContent = `再生位置: ${currentSec.toFixed(2)}s`;
+    drawWaveform();
+
+    if (currentSec < playbackEndSec && currentSourceNode) {
+      playbackAnimationFrame = requestAnimationFrame(tick);
+    }
+  }
+
+  tick();
+}
+
+async function playAudioBuffer(buffer, startSec = 0, endSec = null, modeLabel = "全体") {
+  if (!buffer) return;
+
+  ensureAudioContext();
+  stopCurrentPlayback();
+
+  if (audioContext.state === "suspended") {
+    await audioContext.resume();
+  }
+
+  const source = audioContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioContext.destination);
+  currentSourceNode = source;
+
+  const duration = buffer.duration;
+  const clampedStart = Math.max(0, Math.min(startSec, duration));
+  const clampedEnd = endSec == null ? duration : Math.max(clampedStart, Math.min(endSec, duration));
+  const playDuration = Math.max(0, clampedEnd - clampedStart);
+
+  if (playDuration <= 0) {
+    setStatus("再生範囲が不正です");
+    return;
+  }
+
+  setStatus("再生中...");
+  startPlaybackAnimation(buffer, clampedStart, clampedEnd, modeLabel);
+
+  source.onended = () => {
+    if (currentSourceNode === source) {
+      currentSourceNode = null;
+      stopPlaybackAnimation();
+      drawWaveform();
+      setStatus("再生終了");
+    }
+  };
+
+  try {
+    source.start(0, clampedStart, playDuration);
+  } catch (err) {
+    console.error(err);
+    setStatus("再生失敗");
+    alert("再生に失敗しました。ページを再読み込みして再度試してください。");
+  }
+}
+
+// ------------------------------
+// View / selection
+// ------------------------------
+function clearSelection() {
+  selectionStart = null;
+  selectionEnd = null;
+  selectionInfoEl.textContent = "選択範囲: なし";
+  updateSelectionDependentButtons();
+}
+
+function updateSelectionInfo() {
+  if (selectionStart == null || selectionEnd == null || !editedAudioBuffer) {
+    selectionInfoEl.textContent = "選択範囲: なし";
+    updateSelectionDependentButtons();
+    return;
+  }
+
+  const s = Math.min(selectionStart, selectionEnd);
+  const e = Math.max(selectionStart, selectionEnd);
+  const startSec = (s / editedAudioBuffer.sampleRate).toFixed(2);
+  const endSec = (e / editedAudioBuffer.sampleRate).toFixed(2);
+
+  selectionInfoEl.textContent = `選択範囲: ${startSec}s ～ ${endSec}s`;
+  updateSelectionDependentButtons();
+}
+
+function resetView() {
+  if (!editedAudioBuffer) return;
+  viewStart = 0;
+  viewEnd = editedAudioBuffer.length;
+  updateViewInfo();
+}
+
+function updateViewInfo() {
+  if (!editedAudioBuffer) {
+    viewInfoEl.textContent = "表示範囲: なし";
+    return;
+  }
+
+  const total = editedAudioBuffer.length;
+  const startRatio = ((viewStart / total) * 100).toFixed(1);
+  const endRatio = ((viewEnd / total) * 100).toFixed(1);
+
+  const startSec = (viewStart / editedAudioBuffer.sampleRate).toFixed(2);
+  const endSec = (viewEnd / editedAudioBuffer.sampleRate).toFixed(2);
+
+  viewInfoEl.textContent = `表示範囲: ${startRatio}% ～ ${endRatio}% (${startSec}s ～ ${endSec}s)`;
+}
+
+function scrollView(direction) {
+  if (!editedAudioBuffer) return;
+
+  const currentLength = viewEnd - viewStart;
+  const shift = Math.floor(currentLength * 0.25) * direction;
+
+  let newStart = viewStart + shift;
+  let newEnd = viewEnd + shift;
+
+  if (newStart < 0) {
+    newEnd -= newStart;
+    newStart = 0;
+  }
+
+  if (newEnd > editedAudioBuffer.length) {
+    const over = newEnd - editedAudioBuffer.length;
+    newStart -= over;
+    newEnd = editedAudioBuffer.length;
+  }
+
+  newStart = Math.max(0, newStart);
+  newEnd = Math.min(editedAudioBuffer.length, newEnd);
+
+  viewStart = newStart;
+  viewEnd = newEnd;
+  updateViewInfo();
+  drawWaveform();
+}
+
+function zoomView(factor) {
+  if (!editedAudioBuffer) return;
+
+  const currentLength = viewEnd - viewStart;
+  const center = viewStart + currentLength / 2;
+  let newLength = Math.floor(currentLength * factor);
+
+  const minLength = 500;
+  const maxLength = editedAudioBuffer.length;
+  newLength = Math.max(minLength, Math.min(maxLength, newLength));
+
+  let newStart = Math.floor(center - newLength / 2);
+  let newEnd = Math.floor(center + newLength / 2);
+
+  if (newStart < 0) {
+    newEnd -= newStart;
+    newStart = 0;
+  }
+  if (newEnd > editedAudioBuffer.length) {
+    const over = newEnd - editedAudioBuffer.length;
+    newStart -= over;
+    newEnd = editedAudioBuffer.length;
+  }
+
+  newStart = Math.max(0, newStart);
+  newEnd = Math.min(editedAudioBuffer.length, newEnd);
+
+  viewStart = newStart;
+  viewEnd = newEnd;
+  updateViewInfo();
+  drawWaveform();
+}
+
+function zoomToSelection() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+
+  const s = Math.min(selectionStart, selectionEnd);
+  const e = Math.max(selectionStart, selectionEnd);
+
+  if (e - s < 10) return;
+
+  viewStart = s;
+  viewEnd = e;
+  updateViewInfo();
+  drawWaveform();
+}
+
+// ------------------------------
+// Canvas mapping
+// ------------------------------
 function canvasXToSample(x) {
   if (!editedAudioBuffer) return 0;
   const width = canvas.clientWidth;
@@ -379,6 +651,9 @@ function sampleToCanvasX(sampleIndex) {
   return ((sampleIndex - viewStart) / (viewEnd - viewStart)) * width;
 }
 
+// ------------------------------
+// Drawing
+// ------------------------------
 function drawWaveform() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
@@ -433,13 +708,14 @@ function drawWaveform() {
   if (selectionStart != null && selectionEnd != null) {
     const s = Math.min(selectionStart, selectionEnd);
     const e = Math.max(selectionStart, selectionEnd);
+
     const x1 = sampleToCanvasX(s);
     const x2 = sampleToCanvasX(e);
 
-    ctx.fillStyle = "rgba(0, 0, 255, 0.12)";
+    ctx.fillStyle = "rgba(0, 80, 255, 0.14)";
     ctx.fillRect(x1, 0, x2 - x1, height);
 
-    ctx.strokeStyle = "rgba(0, 0, 255, 0.8)";
+    ctx.strokeStyle = "rgba(0, 80, 255, 0.9)";
     ctx.beginPath();
     ctx.moveTo(x1, 0);
     ctx.lineTo(x1, height);
@@ -447,8 +723,21 @@ function drawWaveform() {
     ctx.lineTo(x2, height);
     ctx.stroke();
   }
+
+  if (currentPlayheadSample != null && currentPlayheadSample >= viewStart && currentPlayheadSample <= viewEnd) {
+    const x = sampleToCanvasX(currentPlayheadSample);
+    ctx.strokeStyle = "rgba(255, 0, 0, 0.95)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
 }
 
+// ------------------------------
+// Editing tools
+// ------------------------------
 function applyDrawTool(sampleCenter, ampTarget) {
   const data = editedAudioBuffer.getChannelData(0);
   const radius = parseInt(brushSizeInput.value, 10);
@@ -551,50 +840,131 @@ function resetEditedAudio() {
   setStatus("編集をリセット");
 }
 
-function zoomView(factor) {
-  if (!editedAudioBuffer) return;
+// ------------------------------
+// Save / load / duplicate / delete
+// ------------------------------
+async function saveCurrentMaterial(asEditedCopy = false) {
+  if (!originalAudioBuffer || !editedAudioBuffer) return;
 
-  const currentLength = viewEnd - viewStart;
-  const center = viewStart + currentLength / 2;
-  let newLength = Math.floor(currentLength * factor);
+  const baseName = saveNameInput.value.trim() || currentMaterialName || "untitled";
+  const finalName = asEditedCopy ? `${baseName}_edited_${Date.now()}` : baseName;
 
-  const minLength = 500;
-  const maxLength = editedAudioBuffer.length;
+  const material = {
+    id: generateId(),
+    name: finalName,
+    source: currentMaterialSource || "不明",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    original: audioBufferToChannelArrays(originalAudioBuffer),
+    edited: audioBufferToChannelArrays(editedAudioBuffer)
+  };
 
-  newLength = Math.max(minLength, Math.min(maxLength, newLength));
-
-  let newStart = Math.floor(center - newLength / 2);
-  let newEnd = Math.floor(center + newLength / 2);
-
-  if (newStart < 0) {
-    newEnd -= newStart;
-    newStart = 0;
-  }
-  if (newEnd > editedAudioBuffer.length) {
-    const over = newEnd - editedAudioBuffer.length;
-    newStart -= over;
-    newEnd = editedAudioBuffer.length;
-  }
-
-  newStart = Math.max(0, newStart);
-  newEnd = Math.min(editedAudioBuffer.length, newEnd);
-
-  viewStart = newStart;
-  viewEnd = newEnd;
-  updateViewInfo();
-  drawWaveform();
+  await dbPutMaterial(material);
+  setStatus(asEditedCopy ? "編集版を保存しました" : "保存しました");
+  await refreshLibrary();
 }
 
-function playSelection() {
-  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+async function loadMaterialFromDB(id) {
+  try {
+    const item = await dbGetMaterial(id);
+    if (!item) return;
 
-  const s = Math.min(selectionStart, selectionEnd);
-  const e = Math.max(selectionStart, selectionEnd);
-  const sr = editedAudioBuffer.sampleRate;
+    ensureAudioContext();
+    originalAudioBuffer = channelArraysToAudioBuffer(item.original);
+    editedAudioBuffer = channelArraysToAudioBuffer(item.edited);
+    historyStack = [];
+    currentMaterialName = item.name || "";
+    currentMaterialSource = item.source || "";
 
-  playAudioBuffer(editedAudioBuffer, s / sr, e / sr);
+    saveNameInput.value = currentMaterialName;
+    fileInfoEl.textContent = `ライブラリ: ${item.name}`;
+    clearSelection();
+    resetView();
+    enableEditingButtons(true);
+    drawWaveform();
+    setStatus("素材を読み込みました");
+  } catch (err) {
+    console.error(err);
+    setStatus("素材読込失敗");
+    alert("保存済み素材の読み込みに失敗しました。");
+  }
 }
 
+async function duplicateMaterial(id) {
+  const item = await dbGetMaterial(id);
+  if (!item) return;
+
+  const duplicated = {
+    ...item,
+    id: generateId(),
+    name: `${item.name}_copy`,
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+
+  await dbPutMaterial(duplicated);
+  setStatus("素材を複製しました");
+  await refreshLibrary();
+}
+
+async function deleteMaterial(id) {
+  const ok = confirm("この素材を削除しますか？");
+  if (!ok) return;
+
+  await dbDeleteMaterial(id);
+  setStatus("素材を削除しました");
+  await refreshLibrary();
+}
+
+async function refreshLibrary() {
+  try {
+    const items = await dbGetAllMaterials();
+
+    if (!items.length) {
+      libraryList.innerHTML = `<div class="library-item"><div class="library-meta">保存済み素材はありません。</div></div>`;
+      return;
+    }
+
+    libraryList.innerHTML = items.map(item => {
+      const durSec = item.edited?.sampleRate ? (item.edited.length / item.edited.sampleRate).toFixed(2) : "-";
+      return `
+        <div class="library-item">
+          <div class="library-item-head">
+            <div>
+              <div class="library-title">${escapeHtml(item.name || "(no name)")}</div>
+              <div class="library-meta">
+                種別: ${escapeHtml(item.source || "-")}<br>
+                長さ: ${durSec}s<br>
+                更新: ${escapeHtml(formatDate(item.updatedAt))}
+              </div>
+            </div>
+          </div>
+          <div class="library-actions">
+            <button data-action="load" data-id="${item.id}">読み込み</button>
+            <button data-action="duplicate" data-id="${item.id}">複製</button>
+            <button data-action="delete" data-id="${item.id}">削除</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+  } catch (err) {
+    console.error(err);
+    libraryList.innerHTML = `<div class="library-item"><div class="library-meta">ライブラリ読込に失敗しました。</div></div>`;
+  }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+// ------------------------------
+// WAV export
+// ------------------------------
 function audioBufferToWavBlob(buffer) {
   const numChannels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
@@ -648,16 +1018,18 @@ function exportEditedWav() {
 
   const wavBlob = audioBufferToWavBlob(editedAudioBuffer);
   const url = URL.createObjectURL(wavBlob);
-
   const a = document.createElement("a");
   a.href = url;
-  a.download = "edited_voice.wav";
+  a.download = `${(saveNameInput.value.trim() || "edited_voice")}.wav`;
   a.click();
 
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   setStatus("WAVを書き出しました");
 }
 
+// ------------------------------
+// Pointer events
+// ------------------------------
 function getCanvasLocalPos(event) {
   const rect = canvas.getBoundingClientRect();
   return {
@@ -721,6 +1093,9 @@ canvas.addEventListener("pointercancel", () => {
   isPointerDown = false;
 });
 
+// ------------------------------
+// Events
+// ------------------------------
 recordBtn.addEventListener("click", async () => {
   if (!mediaRecorder || mediaRecorder.state === "inactive") {
     await startRecording();
@@ -748,27 +1123,35 @@ anyFileInput.addEventListener("change", async (event) => {
 });
 
 playOriginalBtn.addEventListener("click", () => {
-  playAudioBuffer(originalAudioBuffer);
+  if (!originalAudioBuffer) return;
+  playAudioBuffer(originalAudioBuffer, 0, originalAudioBuffer.duration, "元音声 全体");
 });
 
 playEditedBtn.addEventListener("click", () => {
-  playAudioBuffer(editedAudioBuffer);
+  if (!editedAudioBuffer) return;
+  playAudioBuffer(editedAudioBuffer, 0, editedAudioBuffer.duration, "編集後 全体");
+});
+
+playSelectionBtn.addEventListener("click", () => {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+
+  const s = Math.min(selectionStart, selectionEnd);
+  const e = Math.max(selectionStart, selectionEnd);
+  const sr = editedAudioBuffer.sampleRate;
+
+  playAudioBuffer(editedAudioBuffer, s / sr, e / sr, "選択範囲");
 });
 
 stopBtn.addEventListener("click", () => {
   stopCurrentPlayback();
 });
 
-undoBtn.addEventListener("click", () => {
-  undoEdit();
+scrollLeftBtn.addEventListener("click", () => {
+  scrollView(-1);
 });
 
-resetBtn.addEventListener("click", () => {
-  resetEditedAudio();
-});
-
-saveBtn.addEventListener("click", () => {
-  exportEditedWav();
+scrollRightBtn.addEventListener("click", () => {
+  scrollView(1);
 });
 
 zoomInBtn.addEventListener("click", () => {
@@ -779,13 +1162,68 @@ zoomOutBtn.addEventListener("click", () => {
   zoomView(2.0);
 });
 
+zoomToSelectionBtn.addEventListener("click", () => {
+  zoomToSelection();
+});
+
 fullViewBtn.addEventListener("click", () => {
   resetView();
   drawWaveform();
 });
 
-playSelectionBtn.addEventListener("click", () => {
-  playSelection();
+undoBtn.addEventListener("click", () => {
+  undoEdit();
 });
 
+resetBtn.addEventListener("click", () => {
+  resetEditedAudio();
+});
+
+saveWavBtn.addEventListener("click", () => {
+  exportEditedWav();
+});
+
+saveCurrentBtn.addEventListener("click", async () => {
+  try {
+    await saveCurrentMaterial(false);
+  } catch (err) {
+    console.error(err);
+    alert("保存に失敗しました。");
+  }
+});
+
+saveEditedAsBtn.addEventListener("click", async () => {
+  try {
+    await saveCurrentMaterial(true);
+  } catch (err) {
+    console.error(err);
+    alert("編集版保存に失敗しました。");
+  }
+});
+
+refreshLibraryBtn.addEventListener("click", async () => {
+  await refreshLibrary();
+});
+
+libraryList.addEventListener("click", async (event) => {
+  const btn = event.target.closest("button[data-action]");
+  if (!btn) return;
+
+  const action = btn.dataset.action;
+  const id = btn.dataset.id;
+  if (!id) return;
+
+  if (action === "load") {
+    await loadMaterialFromDB(id);
+  } else if (action === "duplicate") {
+    await duplicateMaterial(id);
+  } else if (action === "delete") {
+    await deleteMaterial(id);
+  }
+});
+
+// ------------------------------
+// Init
+// ------------------------------
 drawWaveform();
+refreshLibrary();
