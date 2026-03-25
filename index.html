@@ -10,7 +10,7 @@
   <div class="app">
     <header class="topbar">
       <h1>Wave Voice Lab</h1>
-      <p class="subtitle">マイク録音 / 音声・動画ファイル読込 → 波形編集 → 再生</p>
+      <p class="subtitle">マイク録音 / 音声読込 / 動画読込 → 波形編集 → 再生</p>
     </header>
 
     <main class="main">
@@ -24,9 +24,32 @@
 
         <div class="row">
           <button id="recordBtn">録音開始</button>
+        </div>
+
+        <div class="row">
           <label class="file-label">
-            音声/動画ファイルを選択
-            <input id="fileInput" type="file" accept="audio/*,video/*" />
+            音声ファイルを選択
+            <input
+              id="audioInput"
+              type="file"
+              accept=".wav,.mp3,.m4a,.aac,.ogg,.oga,.flac,.aif,.aiff,audio/*"
+            />
+          </label>
+
+          <label class="file-label">
+            動画ファイルを選択
+            <input
+              id="videoInput"
+              type="file"
+              accept=".mp4,.mov,.m4v,.webm,.ogv,video/*"
+            />
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="file-label alt">
+            なんでも選択
+            <input id="anyFileInput" type="file" />
           </label>
         </div>
 
@@ -95,9 +118,10 @@
       </section>
 
       <section class="panel help-panel">
-        <h2>操作</h2>
+        <h2>使い方</h2>
         <p>
-          録音、または音声/動画ファイルを読み込むと波形が表示されます。<br>
+          音声ファイル、動画ファイル、または録音から音を読み込めます。<br>
+          iPadで選べない場合は「なんでも選択」を使ってください。<br>
           Draw: 波形を上下に変形します。<br>
           Smooth: 局所的になめらかにします。<br>
           Gain: 局所的に振幅を増やします。<br>
