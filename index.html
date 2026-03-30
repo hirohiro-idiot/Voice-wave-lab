@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wave Voice Lab v4.9.1</title>
+  <title>Wave Voice Lab v5.0</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <h1>Wave Voice Lab v4.9.1</h1>
-      <p class="subtitle">精密表示・元波形オーバーレイ・周期単位抽出・音声専用強化版</p>
+      <h1>Wave Voice Lab v5.0</h1>
+      <p class="subtitle">周期グループ抽出・代表1周期編集・全周期一括反映</p>
     </header>
 
     <main class="main">
@@ -157,7 +157,7 @@
         </div>
 
         <div class="editor-row">
-          <label for="toolSelect">編集ツール</label>
+          <label for="toolSelect">通常編集ツール</label>
           <select id="toolSelect">
             <option value="draw">Draw（上下変形）</option>
             <option value="smooth">Smooth（なめらか化）</option>
@@ -167,13 +167,13 @@
         </div>
 
         <div class="editor-row">
-          <label for="brushSize">ブラシ幅</label>
+          <label for="brushSize">通常ブラシ幅</label>
           <input type="range" id="brushSize" min="5" max="300" value="60" />
           <span id="brushSizeValue">60</span>
         </div>
 
         <div class="editor-row">
-          <label for="strength">強さ</label>
+          <label for="strength">通常強さ</label>
           <input type="range" id="strength" min="1" max="100" value="30" />
           <span id="strengthValue">30</span>
         </div>
@@ -185,12 +185,39 @@
           <button id="saveWavBtn" disabled>WAV保存</button>
         </div>
 
+        <hr>
+
+        <h3>周期グループ編集</h3>
+
         <div class="row small-row">
-          <span id="unitInfoText">単位波形: なし</span>
+          <span id="groupInfoText">周期グループ: なし</span>
+        </div>
+
+        <div class="row small-row">
+          <span id="unitInfoText">代表周期: なし</span>
         </div>
 
         <div class="row controls-row">
-          <button id="playUnitBtn" disabled>単位波形を再生</button>
+          <button id="playUnitBtn" disabled>代表周期を再生</button>
+          <button id="groupPlayBtn" disabled>周期グループを再生</button>
+          <button id="clearGroupBtn" disabled>周期グループ解除</button>
+        </div>
+
+        <div class="row controls-row">
+          <button id="unitEditModeBtn" disabled>周期表示操作中（タップで周期編集へ）</button>
+          <button id="applyUnitToGroupBtn" disabled>代表周期の編集を全周期へ反映</button>
+        </div>
+
+        <div class="editor-row">
+          <label for="unitBrushSize">周期ブラシ幅</label>
+          <input type="range" id="unitBrushSize" min="1" max="200" value="24" />
+          <span id="unitBrushSizeValue">24</span>
+        </div>
+
+        <div class="editor-row">
+          <label for="unitStrength">周期強さ</label>
+          <input type="range" id="unitStrength" min="1" max="100" value="35" />
+          <span id="unitStrengthValue">35</span>
         </div>
 
         <div class="canvas-wrap unit-canvas-wrap">
@@ -198,13 +225,13 @@
         </div>
 
         <p class="hint">
-          緑帯は連続区間候補、緑の縦線はその境界、オレンジ線は瞬時イベント候補です。<br>
-          表示操作モードで解析結果をタップすると、連続区間では1周期、瞬時区間では短時間イベントを下に表示します。
+          表示操作モードで編集画面の解析結果をタップすると、周期グループ候補を抽出します。<br>
+          その後、下段の代表周期を編集し、「代表周期の編集を全周期へ反映」でまとめて適用できます。
         </p>
       </section>
     </main>
   </div>
 
-  <script src="script.js?v=491"></script>
+  <script src="script.js?v=500"></script>
 </body>
 </html>
