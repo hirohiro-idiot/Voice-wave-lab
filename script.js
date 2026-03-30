@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v4.9.1
-// 音声専用 / 精密表示 / 元波形オーバーレイ / 周期単位抽出 / 音声専用強化
+// Wave Voice Lab v5.0
+// 周期グループ抽出 / 代表周期編集 / 全周期一括反映
 // =====================================================
 
 // ------------------------------
@@ -77,8 +77,18 @@ const editFullViewBtn = document.getElementById("editFullViewBtn");
 const precisionToggleBtn = document.getElementById("precisionToggleBtn");
 const overlayModeBtn = document.getElementById("overlayModeBtn");
 
+const groupInfoText = document.getElementById("groupInfoText");
 const unitInfoText = document.getElementById("unitInfoText");
 const playUnitBtn = document.getElementById("playUnitBtn");
+const groupPlayBtn = document.getElementById("groupPlayBtn");
+const clearGroupBtn = document.getElementById("clearGroupBtn");
+const unitEditModeBtn = document.getElementById("unitEditModeBtn");
+const applyUnitToGroupBtn = document.getElementById("applyUnitToGroupBtn");
+
+const unitBrushSizeInput = document.getElementById("unitBrushSize");
+const unitStrengthInput = document.getElementById("unitStrength");
+const unitBrushSizeValue = document.getElementById("unitBrushSizeValue");
+const unitStrengthValue = document.getElementById("unitStrengthValue");
 
 const mainCanvas = document.getElementById("mainWaveCanvas");
 const mainCtx = mainCanvas.getContext("2d");
@@ -148,7 +158,28 @@ let lastTapX = 0;
 let analysisState = {
   continuousRegions: [],
   transientEvents: [],
-  selectedUnit: null,
+};
+
+// ------------------------------
+// Group state
+// ------------------------------
+let groupState = {
+  boundaries: [],            // sample positions [b0,b1,b2...]
+  groupStartSample: null,
+  groupEndSample: null,
+  cycleCount: 0,
+  representativeIndex: null, // cycle index
+  selectedCycleStart: null,
+  selectedCycleEnd: null,
+  unitOriginal: null,        // Float32Array normalized unit
+  unitEdited: null,          // Float32Array normalized unit
+};
+
+let unitEditorState = {
+  mode: "navigate", // navigate / draw
+  isPointerDown: false,
+  lastX: null,
+  lastY: null,
 };
 
 // ------------------------------
@@ -185,7 +216,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v491";
+const DB_NAME = "wave_voice_lab_db_v500";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -287,6 +318,47 @@ function clampSample(v) {
   return Math.max(-1, Math.min(1, v));
 }
 
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function resampleArrayLinear(src, targetLength) {
+  if (!src || targetLength <= 0) return new Float32Array(0);
+  if (src.length === targetLength) return new Float32Array(src);
+  if (src.length === 1) {
+    const out = new Float32Array(targetLength);
+    out.fill(src[0]);
+    return out;
+  }
+
+  const out = new Float32Array(targetLength);
+  const maxSrc = src.length - 1;
+
+  for (let i = 0; i < targetLength; i++) {
+    const pos = (i / Math.max(1, targetLength - 1)) * maxSrc;
+    const i0 = Math.floor(pos);
+    const i1 = Math.min(maxSrc, i0 + 1);
+    const t = pos - i0;
+    out[i] = lerp(src[i0], src[i1], t);
+  }
+  return out;
+}
+
+function normalizedCorrelation(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n <= 1) return 0;
+
+  let sum = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < n; i++) {
+    sum += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return sum / (Math.sqrt(na * nb) || 1e-9);
+}
+
 function generateId() {
   return `mat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -308,6 +380,8 @@ function escapeHtml(str) {
 function updateBrushLabels() {
   brushSizeValue.textContent = brushSizeInput.value;
   strengthValue.textContent = strengthInput.value;
+  unitBrushSizeValue.textContent = unitBrushSizeInput.value;
+  unitStrengthValue.textContent = unitStrengthInput.value;
 }
 
 function updateSpeedLabels() {
@@ -335,15 +409,25 @@ function updatePlaybackInfoText() {
 
 function setEditInteractionMode(mode) {
   editSession.interactionMode = mode;
-
-  if (mode === "navigate") {
-    editModeToggleBtn.textContent = "表示操作中（タップで編集操作へ）";
-  } else {
-    editModeToggleBtn.textContent = "編集操作中（タップで表示操作へ）";
-  }
+  editModeToggleBtn.textContent =
+    mode === "navigate"
+      ? "表示操作中（タップで編集操作へ）"
+      : "編集操作中（タップで表示操作へ）";
 
   isEditPointerDown = false;
   editPointerState.clear();
+}
+
+function setUnitEditMode(mode) {
+  unitEditorState.mode = mode;
+  unitEditorState.isPointerDown = false;
+  unitEditorState.lastX = null;
+  unitEditorState.lastY = null;
+
+  unitEditModeBtn.textContent =
+    mode === "navigate"
+      ? "周期表示操作中（タップで周期編集へ）"
+      : "周期編集操作中（タップで表示操作へ）";
 }
 
 function updatePrecisionButton() {
@@ -364,16 +448,7 @@ function isAllowedAudioFile(file) {
   const type = (file.type || "").toLowerCase();
 
   const allowedExt = [
-    ".wav",
-    ".mp3",
-    ".m4a",
-    ".aac",
-    ".ogg",
-    ".oga",
-    ".flac",
-    ".aif",
-    ".aiff",
-    ".webm"
+    ".wav", ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".flac", ".aif", ".aiff", ".webm"
   ];
 
   const hasAllowedExt = allowedExt.some(ext => name.endsWith(ext));
@@ -382,8 +457,15 @@ function isAllowedAudioFile(file) {
   return hasAllowedExt || isAudioMime;
 }
 
+recordBtn.addEventListener("click", async () => {
+  if (!mediaRecorder || mediaRecorder.state === "inactive") await startRecording();
+  else stopRecording();
+});
+
 brushSizeInput.addEventListener("input", updateBrushLabels);
 strengthInput.addEventListener("input", updateBrushLabels);
+unitBrushSizeInput.addEventListener("input", updateBrushLabels);
+unitStrengthInput.addEventListener("input", updateBrushLabels);
 speedSlider.addEventListener("input", updateSpeedLabels);
 updateBrushLabels();
 updateSpeedLabels();
@@ -438,11 +520,9 @@ function cloneAudioBuffer(buffer) {
     buffer.length,
     buffer.sampleRate
   );
-
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
     copy.getChannelData(ch).set(buffer.getChannelData(ch));
   }
-
   return copy;
 }
 
@@ -466,7 +546,6 @@ function channelArraysToAudioBuffer(data) {
     data.length,
     data.sampleRate
   );
-
   for (let ch = 0; ch < data.numberOfChannels; ch++) {
     buffer.getChannelData(ch).set(new Float32Array(data.channels[ch]));
   }
@@ -478,19 +557,14 @@ function channelArraysToAudioBuffer(data) {
 // ------------------------------
 function computeEnergy(data, start, end) {
   let sum = 0;
-  for (let i = start; i < end; i++) {
-    const v = data[i];
-    sum += v * v;
-  }
+  for (let i = start; i < end; i++) sum += data[i] * data[i];
   return sum / Math.max(1, end - start);
 }
 
 function computeZeroCrossRate(data, start, end) {
   let count = 0;
   for (let i = start + 1; i < end; i++) {
-    if ((data[i - 1] >= 0 && data[i] < 0) || (data[i - 1] < 0 && data[i] >= 0)) {
-      count++;
-    }
+    if ((data[i - 1] >= 0 && data[i] < 0) || (data[i - 1] < 0 && data[i] >= 0)) count++;
   }
   return count / Math.max(1, end - start);
 }
@@ -512,8 +586,7 @@ function computeAutocorrPeak(data, start, end, minLag, maxLag) {
     }
 
     const denom = Math.sqrt(normA * normB) || 1e-9;
-    const corr = sum / denom;
-    if (corr > best) best = corr;
+    best = Math.max(best, sum / denom);
   }
 
   return best;
@@ -548,9 +621,7 @@ function estimateLocalPeriodSamples(centerSample) {
       normB += b * b;
     }
 
-    const denom = Math.sqrt(normA * normB) || 1e-9;
-    const corr = sum / denom;
-
+    const corr = sum / (Math.sqrt(normA * normB) || 1e-9);
     if (corr > bestCorr) {
       bestCorr = corr;
       bestLag = lag;
@@ -577,149 +648,37 @@ function findNearestUpwardZeroCrossing(data, target, searchRadius) {
       }
     }
   }
-
   return bestIndex;
-}
-
-function findNextUpwardZeroCrossing(data, startIndex, minStep, maxStep) {
-  const start = Math.max(1, startIndex + minStep);
-  const end = Math.min(data.length - 1, startIndex + maxStep);
-
-  for (let i = start; i <= end; i++) {
-    if (data[i - 1] <= 0 && data[i] > 0) {
-      return i;
-    }
-  }
-
-  return null;
 }
 
 function findPrevUpwardZeroCrossing(data, startIndex, minStep, maxStep) {
   const start = Math.max(1, startIndex - maxStep);
   const end = Math.max(1, startIndex - minStep);
-
   for (let i = end; i >= start; i--) {
-    if (data[i - 1] <= 0 && data[i] > 0) {
-      return i;
-    }
+    if (data[i - 1] <= 0 && data[i] > 0) return i;
   }
-
   return null;
 }
 
-function analyzeSelectedRegion() {
-  if (!editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
-
-  const data = editedAudioBuffer.getChannelData(0);
-  const sampleRate = editedAudioBuffer.sampleRate;
-  const startSample = editSession.startSample;
-  const endSample = editSession.endSample;
-
-  analysisState.continuousRegions = [];
-  analysisState.transientEvents = [];
-  analysisState.selectedUnit = null;
-  unitInfoText.textContent = "単位波形: なし";
-
-  const winSize = Math.max(32, Math.floor(sampleRate * 0.02));
-  const hopSize = Math.max(16, Math.floor(sampleRate * 0.01));
-
-  const minLag = Math.max(1, Math.floor(sampleRate / 400));
-  const maxLag = Math.max(minLag + 1, Math.floor(sampleRate / 70));
-
-  const frames = [];
-
-  for (let s = startSample; s + winSize < endSample; s += hopSize) {
-    const e = s + winSize;
-    const energy = computeEnergy(data, s, e);
-    const zcr = computeZeroCrossRate(data, s, e);
-    const periodicity = computeAutocorrPeak(data, s, e, minLag, maxLag);
-
-    frames.push({
-      start: s,
-      end: e,
-      energy,
-      zcr,
-      periodicity,
-    });
+function findNextUpwardZeroCrossing(data, startIndex, minStep, maxStep) {
+  const start = Math.max(1, startIndex + minStep);
+  const end = Math.min(data.length - 1, startIndex + maxStep);
+  for (let i = start; i <= end; i++) {
+    if (data[i - 1] <= 0 && data[i] > 0) return i;
   }
-
-  if (!frames.length) {
-    updateAnalysisButtons();
-    drawEditWaveform();
-    drawUnitWaveform();
-    return;
-  }
-
-  const avgEnergy = frames.reduce((a, f) => a + f.energy, 0) / frames.length;
-  const avgZcr = frames.reduce((a, f) => a + f.zcr, 0) / frames.length;
-
-  let currentRegion = null;
-
-  for (const f of frames) {
-    const isContinuous =
-      f.energy > avgEnergy * 0.35 &&
-      f.periodicity > 0.45 &&
-      f.zcr < avgZcr * 1.3;
-
-    if (isContinuous) {
-      if (!currentRegion) {
-        currentRegion = { startSample: f.start, endSample: f.end };
-      } else {
-        currentRegion.endSample = f.end;
-      }
-    } else {
-      if (currentRegion && currentRegion.endSample - currentRegion.startSample > winSize * 1.5) {
-        analysisState.continuousRegions.push(currentRegion);
-      }
-      currentRegion = null;
-    }
-  }
-
-  if (currentRegion && currentRegion.endSample - currentRegion.startSample > winSize * 1.5) {
-    analysisState.continuousRegions.push(currentRegion);
-  }
-
-  for (let i = 1; i < frames.length; i++) {
-    const prev = frames[i - 1];
-    const cur = frames[i];
-
-    const energyRise = cur.energy / Math.max(prev.energy, 1e-9);
-    const zcrJump = Math.abs(cur.zcr - prev.zcr);
-
-    if (energyRise > 1.8 || zcrJump > avgZcr * 0.35) {
-      analysisState.transientEvents.push({
-        sample: cur.start,
-      });
-    }
-  }
-
-  updateAnalysisButtons();
-  drawEditWaveform();
-  drawUnitWaveform();
-  setStatus("この編集範囲を解析しました");
+  return null;
 }
 
-function selectContinuousUnitAt(sample) {
-  if (!editedAudioBuffer) return;
+function extractOneCycleAround(sample) {
+  if (!editedAudioBuffer) return null;
 
   const data = editedAudioBuffer.getChannelData(0);
   const sr = editedAudioBuffer.sampleRate;
-
   const period = estimateLocalPeriodSamples(sample);
-  if (!period) {
-    unitInfoText.textContent = "単位波形: 周期推定に失敗";
-    analysisState.selectedUnit = null;
-    drawUnitWaveform();
-    return;
-  }
+  if (!period) return null;
 
   const anchor = findNearestUpwardZeroCrossing(data, sample, Math.max(8, Math.floor(period * 0.6)));
-  if (anchor == null) {
-    unitInfoText.textContent = "単位波形: 周期境界が見つかりません";
-    analysisState.selectedUnit = null;
-    drawUnitWaveform();
-    return;
-  }
+  if (anchor == null) return null;
 
   const prev = findPrevUpwardZeroCrossing(
     data,
@@ -743,70 +702,363 @@ function selectContinuousUnitAt(sample) {
     end = anchor;
   }
 
-  if (end == null || end <= start) {
-    unitInfoText.textContent = "単位波形: 1周期の切り出しに失敗";
-    analysisState.selectedUnit = null;
-    drawUnitWaveform();
+  if (end == null || end <= start) return null;
+
+  return {
+    startSample: start,
+    endSample: end,
+    length: end - start,
+    sec: (end - start) / sr
+  };
+}
+
+function analyzeSelectedRegion() {
+  if (!editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
+
+  const data = editedAudioBuffer.getChannelData(0);
+  const sampleRate = editedAudioBuffer.sampleRate;
+  const startSample = editSession.startSample;
+  const endSample = editSession.endSample;
+
+  analysisState.continuousRegions = [];
+  analysisState.transientEvents = [];
+  clearGroup();
+
+  const winSize = Math.max(32, Math.floor(sampleRate * 0.02));
+  const hopSize = Math.max(16, Math.floor(sampleRate * 0.01));
+  const minLag = Math.max(1, Math.floor(sampleRate / 400));
+  const maxLag = Math.max(minLag + 1, Math.floor(sampleRate / 70));
+
+  const frames = [];
+
+  for (let s = startSample; s + winSize < endSample; s += hopSize) {
+    const e = s + winSize;
+    frames.push({
+      start: s,
+      end: e,
+      energy: computeEnergy(data, s, e),
+      zcr: computeZeroCrossRate(data, s, e),
+      periodicity: computeAutocorrPeak(data, s, e, minLag, maxLag),
+    });
+  }
+
+  if (!frames.length) {
+    updateAnalysisButtons();
+    drawEditWaveform();
     return;
   }
 
-  analysisState.selectedUnit = {
-    type: "continuous",
-    startSample: start,
-    endSample: end,
-    centerSample: sample,
-    periodSamples: end - start,
-    anchorSample: anchor,
-  };
+  const avgEnergy = frames.reduce((a, f) => a + f.energy, 0) / frames.length;
+  const avgZcr = frames.reduce((a, f) => a + f.zcr, 0) / frames.length;
 
-  const sec = (end - start) / sr;
-  unitInfoText.textContent =
-    `単位波形: 連続区間 / 1周期 ≒ ${sec.toFixed(5)}s (${end - start} samples)`;
+  let currentRegion = null;
 
-  drawUnitWaveform();
-}
+  for (const f of frames) {
+    const isContinuous =
+      f.energy > avgEnergy * 0.35 &&
+      f.periodicity > 0.45 &&
+      f.zcr < avgZcr * 1.3;
 
-function selectTransientUnitAt(sample) {
-  if (!editedAudioBuffer) return;
+    if (isContinuous) {
+      if (!currentRegion) currentRegion = { startSample: f.start, endSample: f.end };
+      else currentRegion.endSample = f.end;
+    } else {
+      if (currentRegion && currentRegion.endSample - currentRegion.startSample > winSize * 1.5) {
+        analysisState.continuousRegions.push(currentRegion);
+      }
+      currentRegion = null;
+    }
+  }
 
-  const sr = editedAudioBuffer.sampleRate;
-  const half = Math.floor(sr * 0.02);
-  const start = Math.max(0, sample - half);
-  const end = Math.min(editedAudioBuffer.length - 1, sample + half);
+  if (currentRegion && currentRegion.endSample - currentRegion.startSample > winSize * 1.5) {
+    analysisState.continuousRegions.push(currentRegion);
+  }
 
-  analysisState.selectedUnit = {
-    type: "transient",
-    startSample: start,
-    endSample: end,
-    centerSample: sample,
-  };
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const cur = frames[i];
+    const energyRise = cur.energy / Math.max(prev.energy, 1e-9);
+    const zcrJump = Math.abs(cur.zcr - prev.zcr);
+    if (energyRise > 1.8 || zcrJump > avgZcr * 0.35) {
+      analysisState.transientEvents.push({ sample: cur.start });
+    }
+  }
 
-  const sec = (end - start) / sr;
-  unitInfoText.textContent = `単位波形: 瞬時区間 / 長さ ≒ ${sec.toFixed(5)}s`;
-  drawUnitWaveform();
-}
-
-function clearAnalysis() {
-  analysisState.continuousRegions = [];
-  analysisState.transientEvents = [];
-  analysisState.selectedUnit = null;
-  unitInfoText.textContent = "単位波形: なし";
   updateAnalysisButtons();
+  drawEditWaveform();
+  setStatus("この編集範囲を解析しました");
+}
+
+// ------------------------------
+// Group extraction
+// ------------------------------
+function clearGroup() {
+  groupState.boundaries = [];
+  groupState.groupStartSample = null;
+  groupState.groupEndSample = null;
+  groupState.cycleCount = 0;
+  groupState.representativeIndex = null;
+  groupState.selectedCycleStart = null;
+  groupState.selectedCycleEnd = null;
+  groupState.unitOriginal = null;
+  groupState.unitEdited = null;
+
+  groupInfoText.textContent = "周期グループ: なし";
+  unitInfoText.textContent = "代表周期: なし";
+  updateGroupButtons();
+  drawUnitWaveform();
+  drawEditWaveform();
+}
+
+function updateGroupButtons() {
+  const hasUnit = !!groupState.unitEdited;
+  const hasGroup = groupState.cycleCount > 0;
+
+  playUnitBtn.disabled = !hasUnit;
+  groupPlayBtn.disabled = !hasGroup;
+  clearGroupBtn.disabled = !hasGroup;
+  unitEditModeBtn.disabled = !hasUnit;
+  applyUnitToGroupBtn.disabled = !hasUnit || !hasGroup;
+}
+
+function getCycleArray(startSample, endSample) {
+  const data = editedAudioBuffer.getChannelData(0);
+  return data.slice(startSample, endSample);
+}
+
+function tryBuildGroupFromTap(sample) {
+  const region = analysisState.continuousRegions.find(
+    r => sample >= r.startSample && sample <= r.endSample
+  );
+  if (!region) return false;
+
+  const baseCycle = extractOneCycleAround(sample);
+  if (!baseCycle) return false;
+
+  const data = editedAudioBuffer.getChannelData(0);
+  const boundaries = [baseCycle.startSample, baseCycle.endSample];
+  const baseArray = getCycleArray(baseCycle.startSample, baseCycle.endSample);
+  const baseNorm = resampleArrayLinear(baseArray, 128);
+
+  // extend left
+  let currentStart = baseCycle.startSample;
+  let currentLen = baseCycle.length;
+  while (true) {
+    const prevStart = findPrevUpwardZeroCrossing(
+      data,
+      currentStart,
+      Math.max(1, Math.floor(currentLen * 0.5)),
+      Math.max(2, Math.floor(currentLen * 1.5))
+    );
+    if (prevStart == null) break;
+    if (prevStart < region.startSample) break;
+
+    const arr = getCycleArray(prevStart, currentStart);
+    if (arr.length < 4) break;
+
+    const norm = resampleArrayLinear(arr, 128);
+    const sim = normalizedCorrelation(baseNorm, norm);
+    const lenRatio = arr.length / Math.max(1, baseCycle.length);
+
+    if (sim < 0.78 || lenRatio < 0.6 || lenRatio > 1.6) break;
+
+    boundaries.unshift(prevStart);
+    currentLen = currentStart - prevStart;
+    currentStart = prevStart;
+  }
+
+  // extend right
+  let currentEnd = baseCycle.endSample;
+  currentLen = baseCycle.length;
+  while (true) {
+    const nextEnd = findNextUpwardZeroCrossing(
+      data,
+      currentEnd,
+      Math.max(1, Math.floor(currentLen * 0.5)),
+      Math.max(2, Math.floor(currentLen * 1.5))
+    );
+    if (nextEnd == null) break;
+    if (nextEnd > region.endSample) break;
+
+    const arr = getCycleArray(currentEnd, nextEnd);
+    if (arr.length < 4) break;
+
+    const norm = resampleArrayLinear(arr, 128);
+    const sim = normalizedCorrelation(baseNorm, norm);
+    const lenRatio = arr.length / Math.max(1, baseCycle.length);
+
+    if (sim < 0.78 || lenRatio < 0.6 || lenRatio > 1.6) break;
+
+    boundaries.push(nextEnd);
+    currentLen = nextEnd - currentEnd;
+    currentEnd = nextEnd;
+  }
+
+  if (boundaries.length < 2) return false;
+
+  const cycles = boundaries.length - 1;
+  let repIndex = 0;
+  for (let i = 0; i < cycles; i++) {
+    const s = boundaries[i];
+    const e = boundaries[i + 1];
+    if (sample >= s && sample <= e) {
+      repIndex = i;
+      break;
+    }
+  }
+
+  const repStart = boundaries[repIndex];
+  const repEnd = boundaries[repIndex + 1];
+  const repOriginal = getCycleArray(repStart, repEnd);
+  const repEdited = new Float32Array(repOriginal);
+
+  groupState.boundaries = boundaries;
+  groupState.groupStartSample = boundaries[0];
+  groupState.groupEndSample = boundaries[boundaries.length - 1];
+  groupState.cycleCount = cycles;
+  groupState.representativeIndex = repIndex;
+  groupState.selectedCycleStart = repStart;
+  groupState.selectedCycleEnd = repEnd;
+  groupState.unitOriginal = repOriginal;
+  groupState.unitEdited = repEdited;
+
+  groupInfoText.textContent =
+    `周期グループ: ${cycles}周期 / ${((groupState.groupEndSample - groupState.groupStartSample) / editedAudioBuffer.sampleRate).toFixed(4)}s`;
+
+  unitInfoText.textContent =
+    `代表周期: ${((repEnd - repStart) / editedAudioBuffer.sampleRate).toFixed(5)}s (${repEnd - repStart} samples)`;
+
+  updateGroupButtons();
+  drawUnitWaveform();
+  drawEditWaveform();
+  setStatus("周期グループを抽出しました");
+  return true;
+}
+
+function applyUnitEditsToGroup() {
+  if (!editedAudioBuffer || !groupState.unitEdited || groupState.boundaries.length < 2) return;
+
+  const data = editedAudioBuffer.getChannelData(0);
+  const unit = groupState.unitEdited;
+
+  for (let i = 0; i < groupState.boundaries.length - 1; i++) {
+    const s = groupState.boundaries[i];
+    const e = groupState.boundaries[i + 1];
+    const len = e - s;
+    if (len <= 1) continue;
+
+    const mapped = resampleArrayLinear(unit, len);
+    for (let k = 0; k < len; k++) {
+      data[s + k] = clampSample(mapped[k]);
+    }
+  }
+
   drawMainWaveform();
   drawEditWaveform();
-  drawUnitWaveform();
-  setStatus("解析表示を消しました");
+  setStatus("代表周期の編集を全周期へ反映しました");
 }
 
-function updateAnalysisButtons() {
-  const hasContinuous = analysisState.continuousRegions.length > 0;
-  const hasTransient = analysisState.transientEvents.length > 0;
-  const hasAny = hasContinuous || hasTransient;
+// ------------------------------
+// Unit editor
+// ------------------------------
+function getUnitCanvasLocalPos(event) {
+  const rect = unitWaveCanvas.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
 
-  playContinuousBtn.disabled = !hasContinuous;
-  playTransientBtn.disabled = !hasTransient;
-  clearAnalysisBtn.disabled = !hasAny;
-  playUnitBtn.disabled = !analysisState.selectedUnit;
+function unitCanvasXToIndex(x) {
+  if (!groupState.unitEdited) return 0;
+  const width = unitWaveCanvas.clientWidth;
+  const ratio = clamp(x / Math.max(1, width), 0, 1);
+  return Math.floor(ratio * (groupState.unitEdited.length - 1));
+}
+
+function unitCanvasYToAmplitude(y) {
+  const height = unitWaveCanvas.clientHeight;
+  return clamp(1 - (y / Math.max(1, height)) * 2, -1, 1);
+}
+
+function applyUnitBrushAt(x, y) {
+  if (!groupState.unitEdited) return;
+
+  const idx = unitCanvasXToIndex(x);
+  const amp = unitCanvasYToAmplitude(y);
+  const radius = parseInt(unitBrushSizeInput.value, 10);
+  const strength = parseInt(unitStrengthInput.value, 10) / 100;
+
+  const data = groupState.unitEdited;
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(data.length - 1, idx + radius);
+
+  for (let i = start; i <= end; i++) {
+    const dist = Math.abs(i - idx) / Math.max(1, radius);
+    const weight = Math.max(0, 1 - dist);
+    const mix = weight * strength;
+    data[i] = clampSample(data[i] * (1 - mix) + amp * mix);
+  }
+}
+
+function drawUnitWaveform() {
+  const width = unitWaveCanvas.clientWidth;
+  const height = unitWaveCanvas.clientHeight;
+
+  unitWaveCtx.clearRect(0, 0, width, height);
+  unitWaveCtx.fillStyle = "#fafafa";
+  unitWaveCtx.fillRect(0, 0, width, height);
+
+  unitWaveCtx.strokeStyle = "#d0d0d0";
+  unitWaveCtx.lineWidth = 1;
+  unitWaveCtx.beginPath();
+  unitWaveCtx.moveTo(0, height / 2);
+  unitWaveCtx.lineTo(width, height / 2);
+  unitWaveCtx.stroke();
+
+  if (!groupState.unitEdited || !groupState.unitOriginal) {
+    unitWaveCtx.fillStyle = "#888";
+    unitWaveCtx.font = "14px sans-serif";
+    unitWaveCtx.fillText("周期グループをタップすると代表周期がここに表示されます", 16, height / 2 - 8);
+    return;
+  }
+
+  const orig = groupState.unitOriginal;
+  const edited = groupState.unitEdited;
+  const n = Math.max(orig.length, edited.length);
+
+  unitWaveCtx.strokeStyle = "rgba(220,40,40,0.85)";
+  unitWaveCtx.lineWidth = 1.2;
+  unitWaveCtx.beginPath();
+  for (let i = 0; i < orig.length; i++) {
+    const x = (i / Math.max(1, orig.length - 1)) * width;
+    const y = ((1 - orig[i]) * 0.5) * height;
+    if (i === 0) unitWaveCtx.moveTo(x, y);
+    else unitWaveCtx.lineTo(x, y);
+  }
+  unitWaveCtx.stroke();
+
+  unitWaveCtx.strokeStyle = "rgba(20,20,20,0.98)";
+  unitWaveCtx.lineWidth = 1.8;
+  unitWaveCtx.beginPath();
+  for (let i = 0; i < edited.length; i++) {
+    const x = (i / Math.max(1, edited.length - 1)) * width;
+    const y = ((1 - edited[i]) * 0.5) * height;
+    if (i === 0) unitWaveCtx.moveTo(x, y);
+    else unitWaveCtx.lineTo(x, y);
+  }
+  unitWaveCtx.stroke();
+
+  if (edited.length <= 300) {
+    unitWaveCtx.fillStyle = "rgba(20,20,20,0.98)";
+    for (let i = 0; i < edited.length; i++) {
+      const x = (i / Math.max(1, edited.length - 1)) * width;
+      const y = ((1 - edited[i]) * 0.5) * height;
+      unitWaveCtx.beginPath();
+      unitWaveCtx.arc(x, y, 2, 0, Math.PI * 2);
+      unitWaveCtx.fill();
+    }
+  }
 }
 
 // ------------------------------
@@ -839,7 +1091,9 @@ function loadDecodedBuffer(decoded, label = "読込完了", source = "") {
   currentMaterialName = currentMaterialName || label;
   saveNameInput.value = currentMaterialName;
 
-  clearAnalysis();
+  analysisState.continuousRegions = [];
+  analysisState.transientEvents = [];
+  clearGroup();
   resetView();
   resetSelectionDefault();
   stopPlayback();
@@ -920,7 +1174,6 @@ async function startRecording() {
         }
 
         const decoded = await decodeFileToAudioBuffer(fileLike);
-
         currentMaterialName = `record_${new Date().toISOString().replace(/[:.]/g, "-")}`;
         saveNameInput.value = currentMaterialName;
         fileInfoEl.textContent = "マイク録音データ";
@@ -947,9 +1200,7 @@ async function startRecording() {
 }
 
 function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
-  }
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
     mediaStream = null;
@@ -976,9 +1227,7 @@ function getBufferDuration() {
 }
 
 function getModeRange(mode) {
-  if (!editedAudioBuffer) {
-    return { startSec: 0, endSec: 0 };
-  }
+  if (!editedAudioBuffer) return { startSec: 0, endSec: 0 };
 
   if (mode === "selection" && selectionStart != null && selectionEnd != null) {
     return {
@@ -994,10 +1243,7 @@ function getModeRange(mode) {
     };
   }
 
-  return {
-    startSec: 0,
-    endSec: editedAudioBuffer.duration,
-  };
+  return { startSec: 0, endSec: editedAudioBuffer.duration };
 }
 
 function getCurrentPlaybackSec() {
@@ -1022,15 +1268,11 @@ function updatePlayerUI() {
   durationLabel.textContent = formatSec(duration);
   playbackTimeInfoEl.textContent = `再生位置: ${formatSec(current)}`;
 
-  if (!isSeeking) {
-    seekBar.value = duration > 0 ? (current / duration) : 0;
-  }
+  if (!isSeeking) seekBar.value = duration > 0 ? (current / duration) : 0;
 
-  if (editedAudioBuffer) {
-    currentPlayheadSample = Math.floor(current * editedAudioBuffer.sampleRate);
-  } else {
-    currentPlayheadSample = null;
-  }
+  currentPlayheadSample = editedAudioBuffer
+    ? Math.floor(current * editedAudioBuffer.sampleRate)
+    : null;
 
   drawMainWaveform();
   if (isEditMode) drawEditWaveform();
@@ -1038,7 +1280,6 @@ function updatePlayerUI() {
 
 function animatePlayback() {
   updatePlayerUI();
-
   if (!playerState.isPlaying) return;
 
   const cur = getCurrentPlaybackSec();
@@ -1057,9 +1298,8 @@ async function startPlaybackFrom(positionSec, mode = "full") {
   stopCurrentSourceOnly();
 
   const { startSec: rangeStart, endSec: rangeEnd } = getModeRange(mode);
-
-  let startSec = clamp(positionSec, rangeStart, rangeEnd);
-  let endSec = rangeEnd;
+  const startSec = clamp(positionSec, rangeStart, rangeEnd);
+  const endSec = rangeEnd;
 
   if (endSec <= startSec) {
     setStatus("再生範囲が不正です");
@@ -1105,12 +1345,11 @@ async function startPlaybackFrom(positionSec, mode = "full") {
   };
 
   try {
-    const realDuration = (endSec - startSec) / playerState.playbackRate;
-    source.start(0, startSec, realDuration);
+    source.start(0, startSec, (endSec - startSec) / playerState.playbackRate);
   } catch (err) {
     console.error(err);
     setStatus("再生失敗");
-    alert("再生に失敗しました。ページ再読み込み後にもう一度試してください。");
+    alert("再生に失敗しました。");
     return;
   }
 
@@ -1121,9 +1360,7 @@ async function startPlaybackFrom(positionSec, mode = "full") {
 
 function stopCurrentSourceOnly() {
   if (currentSourceNode) {
-    try {
-      currentSourceNode.stop();
-    } catch (_) {}
+    try { currentSourceNode.stop(); } catch (_) {}
   }
   currentSourceNode = null;
   currentGainNode = null;
@@ -1131,7 +1368,6 @@ function stopCurrentSourceOnly() {
 
 function pausePlayback() {
   if (!playerState.isPlaying) return;
-
   playerState.pausedAtSec = getCurrentPlaybackSec();
   playerState.isPlaying = false;
   stopCurrentSourceOnly();
@@ -1141,9 +1377,7 @@ function pausePlayback() {
 }
 
 function stopPlayback(fromEnded = false) {
-  if (playerState.isPlaying || currentSourceNode) {
-    stopCurrentSourceOnly();
-  }
+  if (playerState.isPlaying || currentSourceNode) stopCurrentSourceOnly();
 
   stopPlaybackAnimation();
   playerState.isPlaying = false;
@@ -1166,19 +1400,14 @@ function stopPlayback(fromEnded = false) {
 
 async function playCurrent() {
   if (!editedAudioBuffer) return;
-
   const mode = playerState.lastMode || "full";
   const { startSec, endSec } = getModeRange(mode);
-
-  let start = playerState.pausedAtSec || startSec;
-  start = clamp(start, startSec, endSec);
-
+  const start = clamp(playerState.pausedAtSec || startSec, startSec, endSec);
   await startPlaybackFrom(start, mode);
 }
 
 async function playSelection() {
   if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
-
   const start = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
   playerState.lastMode = "selection";
   updatePlaybackInfoText();
@@ -1187,7 +1416,6 @@ async function playSelection() {
 
 async function playEditRange() {
   if (!isEditMode || !editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
-
   const start = editSession.startSample / editedAudioBuffer.sampleRate;
   playerState.lastMode = "edit";
   updatePlaybackInfoText();
@@ -1196,11 +1424,9 @@ async function playEditRange() {
 
 async function playContinuousRegions() {
   if (!editedAudioBuffer || !analysisState.continuousRegions.length) return;
-
   const first = analysisState.continuousRegions[0];
   const startSec = first.startSample / editedAudioBuffer.sampleRate;
   const endSec = first.endSample / editedAudioBuffer.sampleRate;
-
   playerState.lastMode = "full";
   await startPlaybackFrom(startSec, "full");
   playerState.playEndSec = endSec;
@@ -1209,12 +1435,10 @@ async function playContinuousRegions() {
 
 async function playTransientEvents() {
   if (!editedAudioBuffer || !analysisState.transientEvents.length) return;
-
   const ev = analysisState.transientEvents[0];
   const centerSec = ev.sample / editedAudioBuffer.sampleRate;
   const startSec = Math.max(0, centerSec - 0.03);
   const endSec = Math.min(editedAudioBuffer.duration, centerSec + 0.05);
-
   playerState.lastMode = "full";
   await startPlaybackFrom(startSec, "full");
   playerState.playEndSec = endSec;
@@ -1222,43 +1446,42 @@ async function playTransientEvents() {
 }
 
 async function playSelectedUnit() {
-  if (!editedAudioBuffer || !analysisState.selectedUnit) return;
-
-  const startSec = analysisState.selectedUnit.startSample / editedAudioBuffer.sampleRate;
-  const endSec = analysisState.selectedUnit.endSample / editedAudioBuffer.sampleRate;
-
+  if (!editedAudioBuffer || !groupState.selectedCycleStart || !groupState.selectedCycleEnd) return;
+  const startSec = groupState.selectedCycleStart / editedAudioBuffer.sampleRate;
+  const endSec = groupState.selectedCycleEnd / editedAudioBuffer.sampleRate;
   playerState.lastMode = "full";
   await startPlaybackFrom(startSec, "full");
   playerState.playEndSec = endSec;
-  setStatus("単位波形を再生中");
+  setStatus("代表周期を再生中");
+}
+
+async function playGroup() {
+  if (!editedAudioBuffer || !groupState.groupStartSample || !groupState.groupEndSample) return;
+  const startSec = groupState.groupStartSample / editedAudioBuffer.sampleRate;
+  const endSec = groupState.groupEndSample / editedAudioBuffer.sampleRate;
+  playerState.lastMode = "full";
+  await startPlaybackFrom(startSec, "full");
+  playerState.playEndSec = endSec;
+  setStatus("周期グループを再生中");
 }
 
 function seekTo(sec) {
   if (!editedAudioBuffer) return;
-
   const mode = playerState.isPlaying ? playerState.mode : (playerState.lastMode || "full");
   const { startSec, endSec } = getModeRange(mode);
-
   const newSec = clamp(sec, startSec, endSec);
   playerState.pausedAtSec = newSec;
 
-  if (playerState.isPlaying) {
-    startPlaybackFrom(newSec, mode);
-  } else {
-    updatePlayerUI();
-  }
+  if (playerState.isPlaying) startPlaybackFrom(newSec, mode);
+  else updatePlayerUI();
 }
 
 function skipBy(deltaSec) {
   if (!editedAudioBuffer) return;
-
   const mode = playerState.isPlaying ? playerState.mode : (playerState.lastMode || "full");
   const { startSec, endSec } = getModeRange(mode);
-
   const cur = getCurrentPlaybackSec();
-  const next = clamp(cur + deltaSec, startSec, endSec);
-
-  seekTo(next);
+  seekTo(clamp(cur + deltaSec, startSec, endSec));
 }
 
 function toggleLoop() {
@@ -1318,7 +1541,6 @@ function updateSelectionInfo() {
 
 function scrollView(direction) {
   if (!editedAudioBuffer) return;
-
   const currentLength = viewEnd - viewStart;
   const shift = Math.floor(currentLength * 0.25) * direction;
 
@@ -1349,9 +1571,7 @@ function zoomView(factor, centerSample = null) {
   const center = centerSample == null ? viewStart + currentLength / 2 : centerSample;
   let newLength = Math.floor(currentLength * factor);
 
-  const minLength = 8;
-  const maxLength = editedAudioBuffer.length;
-  newLength = clamp(newLength, minLength, maxLength);
+  newLength = clamp(newLength, 8, editedAudioBuffer.length);
 
   let newStart = Math.floor(center - newLength / 2);
   let newEnd = Math.floor(center + newLength / 2);
@@ -1368,18 +1588,15 @@ function zoomView(factor, centerSample = null) {
 
   viewStart = clamp(newStart, 0, editedAudioBuffer.length);
   viewEnd = clamp(newEnd, 0, editedAudioBuffer.length);
-
   updateViewInfo();
   drawMainWaveform();
 }
 
 function zoomToSelection() {
   if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
-
   const s = Math.min(selectionStart, selectionEnd);
   const e = Math.max(selectionStart, selectionEnd);
   if (e - s < 2) return;
-
   viewStart = s;
   viewEnd = e;
   updateViewInfo();
@@ -1387,7 +1604,7 @@ function zoomToSelection() {
 }
 
 // ------------------------------
-// Edit view helpers
+// Edit view
 // ------------------------------
 function resetEditView() {
   if (!isEditMode) return;
@@ -1437,8 +1654,7 @@ function zoomEditView(factor, centerSample = null) {
 function mainCanvasXToSample(x) {
   if (!editedAudioBuffer) return 0;
   const width = mainCanvas.clientWidth;
-  const ratio = clamp(x / width, 0, 1);
-  return Math.floor(viewStart + ratio * (viewEnd - viewStart));
+  return Math.floor(viewStart + clamp(x / width, 0, 1) * (viewEnd - viewStart));
 }
 
 function sampleToMainCanvasX(sample) {
@@ -1448,18 +1664,12 @@ function sampleToMainCanvasX(sample) {
 
 function getMainCanvasLocalPos(event) {
   const rect = mainCanvas.getBoundingClientRect();
-  return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
-  };
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
 function getEditCanvasLocalPos(event) {
   const rect = editCanvas.getBoundingClientRect();
-  return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
-  };
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
 function distanceBetweenTouches(points) {
@@ -1472,6 +1682,16 @@ function distanceBetweenTouches(points) {
 function centerBetweenTouches(points) {
   if (!points.length) return 0;
   return points.reduce((sum, p) => sum + p.x, 0) / points.length;
+}
+
+function editCanvasXToSample(x) {
+  if (!editedAudioBuffer || editSession.viewStartSample == null || editSession.viewEndSample == null) return 0;
+  const width = editCanvas.clientWidth;
+  return Math.floor(editSession.viewStartSample + clamp(x / width, 0, 1) * (editSession.viewEndSample - editSession.viewStartSample));
+}
+
+function editCanvasYToAmplitude(y) {
+  return clamp(1 - (y / editCanvas.clientHeight) * 2, -1, 1);
 }
 
 // ------------------------------
@@ -1506,13 +1726,12 @@ function drawWaveformToCanvas(ctx, canvas, buffer, startSample, endSample) {
   ctx.lineWidth = 1;
 
   for (let x = 0; x < width; x++) {
-    const start = startSample + x * samplesPerPixel;
-    const end = Math.min(start + samplesPerPixel, endSample);
+    const s = startSample + x * samplesPerPixel;
+    const e = Math.min(s + samplesPerPixel, endSample);
 
     let min = 1;
     let max = -1;
-
-    for (let i = start; i < end; i++) {
+    for (let i = s; i < e; i++) {
       const v = data[i];
       if (v < min) min = v;
       if (v > max) max = v;
@@ -1537,27 +1756,12 @@ function drawPreciseLine(ctx, data, startSample, endSample, width, height, strok
   ctx.beginPath();
 
   for (let i = startSample; i <= endSample; i++) {
-    const ratioX = (i - startSample) / Math.max(1, range);
-    const x = ratioX * width;
+    const x = ((i - startSample) / Math.max(1, range)) * width;
     const y = ((1 - data[i]) * 0.5) * height;
-
     if (i === startSample) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
-
   ctx.stroke();
-
-  if (range <= 300) {
-    ctx.fillStyle = strokeStyle;
-    for (let i = startSample; i <= endSample; i++) {
-      const ratioX = (i - startSample) / Math.max(1, range);
-      const x = ratioX * width;
-      const y = ((1 - data[i]) * 0.5) * height;
-      ctx.beginPath();
-      ctx.arc(x, y, 2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
 }
 
 function drawEditWaveBackground() {
@@ -1577,84 +1781,13 @@ function drawEditWaveBackground() {
 
   if (!editSession.precisionMode) return;
 
-  const vLines = 8;
-  const hLines = 6;
   editCtx.strokeStyle = "rgba(0,0,0,0.08)";
-  editCtx.lineWidth = 1;
-
-  for (let i = 1; i < vLines; i++) {
-    const x = (width / vLines) * i;
+  for (let i = 1; i < 8; i++) {
+    const x = (width / 8) * i;
     editCtx.beginPath();
     editCtx.moveTo(x, 0);
     editCtx.lineTo(x, height);
     editCtx.stroke();
-  }
-
-  for (let i = 1; i < hLines; i++) {
-    const y = (height / hLines) * i;
-    editCtx.beginPath();
-    editCtx.moveTo(0, y);
-    editCtx.lineTo(width, y);
-    editCtx.stroke();
-  }
-}
-
-function drawUnitWaveform() {
-  const width = unitWaveCanvas.clientWidth;
-  const height = unitWaveCanvas.clientHeight;
-
-  unitWaveCtx.clearRect(0, 0, width, height);
-  unitWaveCtx.fillStyle = "#fafafa";
-  unitWaveCtx.fillRect(0, 0, width, height);
-
-  unitWaveCtx.strokeStyle = "#d0d0d0";
-  unitWaveCtx.lineWidth = 1;
-  unitWaveCtx.beginPath();
-  unitWaveCtx.moveTo(0, height / 2);
-  unitWaveCtx.lineTo(width, height / 2);
-  unitWaveCtx.stroke();
-
-  if (!editedAudioBuffer || !analysisState.selectedUnit) {
-    unitWaveCtx.fillStyle = "#888";
-    unitWaveCtx.font = "14px sans-serif";
-    unitWaveCtx.fillText("タップした単位波形がここに表示されます", 16, height / 2 - 8);
-    return;
-  }
-
-  const data = editedAudioBuffer.getChannelData(0);
-  const start = analysisState.selectedUnit.startSample;
-  const end = analysisState.selectedUnit.endSample;
-  const range = Math.max(1, end - start);
-
-  unitWaveCtx.strokeStyle =
-    analysisState.selectedUnit.type === "continuous"
-      ? "rgba(30,30,30,0.98)"
-      : "rgba(255,140,0,0.98)";
-  unitWaveCtx.lineWidth = 1.6;
-  unitWaveCtx.beginPath();
-
-  for (let i = start; i <= end; i++) {
-    const x = ((i - start) / range) * width;
-    const y = ((1 - data[i]) * 0.5) * height;
-
-    if (i === start) unitWaveCtx.moveTo(x, y);
-    else unitWaveCtx.lineTo(x, y);
-  }
-  unitWaveCtx.stroke();
-
-  if (range <= 300) {
-    unitWaveCtx.fillStyle =
-      analysisState.selectedUnit.type === "continuous"
-        ? "rgba(30,30,30,0.98)"
-        : "rgba(255,140,0,0.98)";
-
-    for (let i = start; i <= end; i++) {
-      const x = ((i - start) / range) * width;
-      const y = ((1 - data[i]) * 0.5) * height;
-      unitWaveCtx.beginPath();
-      unitWaveCtx.arc(x, y, 2, 0, Math.PI * 2);
-      unitWaveCtx.fill();
-    }
   }
 }
 
@@ -1666,36 +1799,33 @@ function drawMainWaveform() {
   if (editedAudioBuffer && selectionStart != null && selectionEnd != null) {
     const s = Math.min(selectionStart, selectionEnd);
     const e = Math.max(selectionStart, selectionEnd);
-
     const x1 = sampleToMainCanvasX(s);
     const x2 = sampleToMainCanvasX(e);
 
-    mainCtx.fillStyle = "rgba(0, 80, 255, 0.12)";
+    mainCtx.fillStyle = "rgba(0,80,255,0.12)";
     mainCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
 
-    mainCtx.strokeStyle = "rgba(0, 80, 255, 1)";
+    mainCtx.strokeStyle = "rgba(0,80,255,1)";
     mainCtx.lineWidth = 3;
 
     mainCtx.beginPath();
     mainCtx.moveTo(x1, 0);
     mainCtx.lineTo(x1, height);
     mainCtx.stroke();
-
-    mainCtx.fillStyle = "rgba(0, 80, 255, 1)";
+    mainCtx.fillStyle = "rgba(0,80,255,1)";
     mainCtx.fillRect(x1 - 6, 0, 12, 20);
 
     mainCtx.beginPath();
     mainCtx.moveTo(x2, 0);
     mainCtx.lineTo(x2, height);
     mainCtx.stroke();
-
     mainCtx.fillRect(x2 - 6, 0, 12, 20);
   }
 
   if (editedAudioBuffer && currentPlayheadSample != null) {
     if (currentPlayheadSample >= viewStart && currentPlayheadSample <= viewEnd) {
       const x = sampleToMainCanvasX(currentPlayheadSample);
-      mainCtx.strokeStyle = "rgba(255, 0, 0, 0.95)";
+      mainCtx.strokeStyle = "rgba(255,0,0,0.95)";
       mainCtx.lineWidth = 2;
       mainCtx.beginPath();
       mainCtx.moveTo(x, 0);
@@ -1721,47 +1851,27 @@ function drawEditWaveform() {
   const showOriginal = editSession.overlayMode === "original" || editSession.overlayMode === "overlay";
   const showEdited = editSession.overlayMode === "edited" || editSession.overlayMode === "overlay";
 
-  const precise = editSession.precisionMode;
   const origData = originalAudioBuffer ? originalAudioBuffer.getChannelData(0) : null;
   const editData = editedAudioBuffer.getChannelData(0);
 
-  if (!precise) {
+  if (!editSession.precisionMode) {
+    if (showEdited) drawWaveformToCanvas(editCtx, editCanvas, editedAudioBuffer, start, end);
+
     if (showOriginal && originalAudioBuffer) {
-      editCtx.save();
-      editCtx.globalAlpha = editSession.overlayMode === "overlay" ? 0.85 : 1.0;
-      drawWaveformToCanvas(editCtx, editCanvas, originalAudioBuffer, start, end);
-      editCtx.restore();
-      drawEditWaveBackground();
-    }
-
-    if (showEdited && editedAudioBuffer) {
-      drawWaveformToCanvas(editCtx, editCanvas, editedAudioBuffer, start, end);
-    }
-
-    if (showOriginal && showEdited && originalAudioBuffer) {
-      drawEditWaveBackground();
-      drawWaveformToCanvas(editCtx, editCanvas, editedAudioBuffer, start, end);
-
-      editCtx.strokeStyle = "rgba(220, 40, 40, 0.95)";
+      editCtx.strokeStyle = "rgba(220,40,40,0.9)";
       editCtx.lineWidth = 1.2;
       const samplesPerPixel = Math.max(1, Math.floor((end - start) / width));
-
       for (let x = 0; x < width; x++) {
         const s = start + x * samplesPerPixel;
         const e = Math.min(s + samplesPerPixel, end);
-
-        let min = 1;
-        let max = -1;
-
+        let min = 1, max = -1;
         for (let i = s; i < e; i++) {
           const v = origData[i];
           if (v < min) min = v;
           if (v > max) max = v;
         }
-
         const y1 = ((1 - max) * 0.5) * height;
         const y2 = ((1 - min) * 0.5) * height;
-
         editCtx.beginPath();
         editCtx.moveTo(x, y1);
         editCtx.lineTo(x, y2);
@@ -1777,76 +1887,69 @@ function drawEditWaveform() {
     }
   }
 
-  if (analysisState.continuousRegions.length) {
-    for (const region of analysisState.continuousRegions) {
-      if (region.endSample < start || region.startSample > end) continue;
-
-      const rs = Math.max(region.startSample, start);
-      const re = Math.min(region.endSample, end);
-
-      const x1 = ((rs - start) / Math.max(1, end - start)) * width;
-      const x2 = ((re - start) / Math.max(1, end - start)) * width;
-
-      editCtx.fillStyle = "rgba(40,180,80,0.12)";
-      editCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
-
-      editCtx.strokeStyle = "rgba(20,140,60,0.95)";
-      editCtx.lineWidth = 2;
-      editCtx.beginPath();
-      editCtx.moveTo(x1, 0);
-      editCtx.lineTo(x1, height);
-      editCtx.stroke();
-
-      editCtx.beginPath();
-      editCtx.moveTo(x2, 0);
-      editCtx.lineTo(x2, height);
-      editCtx.stroke();
-    }
+  // continuous regions
+  for (const region of analysisState.continuousRegions) {
+    if (region.endSample < start || region.startSample > end) continue;
+    const rs = Math.max(region.startSample, start);
+    const re = Math.min(region.endSample, end);
+    const x1 = ((rs - start) / Math.max(1, end - start)) * width;
+    const x2 = ((re - start) / Math.max(1, end - start)) * width;
+    editCtx.fillStyle = "rgba(40,180,80,0.10)";
+    editCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
   }
 
-  if (analysisState.transientEvents.length) {
-    for (const ev of analysisState.transientEvents) {
-      if (ev.sample < start || ev.sample > end) continue;
+  // transient events
+  for (const ev of analysisState.transientEvents) {
+    if (ev.sample < start || ev.sample > end) continue;
+    const x = ((ev.sample - start) / Math.max(1, end - start)) * width;
+    editCtx.strokeStyle = "rgba(255,140,0,0.95)";
+    editCtx.lineWidth = 2;
+    editCtx.beginPath();
+    editCtx.moveTo(x, 0);
+    editCtx.lineTo(x, height);
+    editCtx.stroke();
+  }
 
-      const x = ((ev.sample - start) / Math.max(1, end - start)) * width;
-      editCtx.strokeStyle = "rgba(255,140,0,0.95)";
-      editCtx.lineWidth = 2;
+  // group
+  if (groupState.boundaries.length >= 2) {
+    const gs = groupState.groupStartSample;
+    const ge = groupState.groupEndSample;
+
+    if (!(ge < start || gs > end)) {
+      const gx1 = ((Math.max(gs, start) - start) / Math.max(1, end - start)) * width;
+      const gx2 = ((Math.min(ge, end) - start) / Math.max(1, end - start)) * width;
+      editCtx.fillStyle = "rgba(180,0,255,0.08)";
+      editCtx.fillRect(gx1, 0, Math.max(2, gx2 - gx1), height);
+    }
+
+    for (let i = 0; i < groupState.boundaries.length; i++) {
+      const b = groupState.boundaries[i];
+      if (b < start || b > end) continue;
+      const x = ((b - start) / Math.max(1, end - start)) * width;
+      editCtx.strokeStyle = "rgba(180,0,255,0.95)";
+      editCtx.lineWidth = 1.5;
       editCtx.beginPath();
       editCtx.moveTo(x, 0);
       editCtx.lineTo(x, height);
       editCtx.stroke();
     }
-  }
 
-  if (analysisState.selectedUnit) {
-    const us = analysisState.selectedUnit.startSample;
-    const ue = analysisState.selectedUnit.endSample;
-
-    if (!(ue < start || us > end)) {
-      const x1 = ((Math.max(us, start) - start) / Math.max(1, end - start)) * width;
-      const x2 = ((Math.min(ue, end) - start) / Math.max(1, end - start)) * width;
-
-      editCtx.fillStyle = "rgba(180,0,255,0.12)";
-      editCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
-
-      editCtx.strokeStyle = "rgba(180,0,255,0.95)";
-      editCtx.lineWidth = 2;
-      editCtx.beginPath();
-      editCtx.moveTo(x1, 0);
-      editCtx.lineTo(x1, height);
-      editCtx.stroke();
-
-      editCtx.beginPath();
-      editCtx.moveTo(x2, 0);
-      editCtx.lineTo(x2, height);
-      editCtx.stroke();
+    if (groupState.selectedCycleStart != null && groupState.selectedCycleEnd != null) {
+      const us = groupState.selectedCycleStart;
+      const ue = groupState.selectedCycleEnd;
+      if (!(ue < start || us > end)) {
+        const x1 = ((Math.max(us, start) - start) / Math.max(1, end - start)) * width;
+        const x2 = ((Math.min(ue, end) - start) / Math.max(1, end - start)) * width;
+        editCtx.fillStyle = "rgba(100,0,255,0.16)";
+        editCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
+      }
     }
   }
 
   if (editedAudioBuffer && currentPlayheadSample != null) {
     if (currentPlayheadSample >= start && currentPlayheadSample <= end) {
       const x = ((currentPlayheadSample - start) / Math.max(1, end - start)) * width;
-      editCtx.strokeStyle = "rgba(255, 0, 0, 0.95)";
+      editCtx.strokeStyle = "rgba(255,0,0,0.95)";
       editCtx.lineWidth = 2;
       editCtx.beginPath();
       editCtx.moveTo(x, 0);
@@ -1857,7 +1960,7 @@ function drawEditWaveform() {
 }
 
 // ------------------------------
-// Edit mode
+// Edit operations
 // ------------------------------
 function updateEditorInfo() {
   if (editSession.startSample == null || editSession.endSample == null || !editedAudioBuffer) {
@@ -1875,7 +1978,6 @@ function openEditMode() {
 
   const s = Math.min(selectionStart, selectionEnd);
   const e = Math.max(selectionStart, selectionEnd);
-
   if (e - s < 2) {
     alert("編集範囲が短すぎます。");
     return;
@@ -1890,13 +1992,13 @@ function openEditMode() {
   editSession.snapshotBeforeEdit = cloneAudioBuffer(editedAudioBuffer);
   editSession.historyStack = [];
 
-  analysisState.selectedUnit = null;
-  unitInfoText.textContent = "単位波形: なし";
+  clearGroup();
 
   isEditMode = true;
   editorPanel.classList.remove("hidden");
   playerState.lastMode = "edit";
   setEditInteractionMode("navigate");
+  setUnitEditMode("navigate");
   updateEditorInfo();
   updatePlaybackInfoText();
   updatePrecisionButton();
@@ -1921,8 +2023,7 @@ function cancelEditMode() {
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
-  analysisState.selectedUnit = null;
-  unitInfoText.textContent = "単位波形: なし";
+  clearGroup();
 
   isEditMode = false;
   editorPanel.classList.add("hidden");
@@ -1948,8 +2049,7 @@ function applyEditMode() {
   editSession.snapshotBeforeEdit = null;
   editSession.historyStack = [];
 
-  analysisState.selectedUnit = null;
-  unitInfoText.textContent = "単位波形: なし";
+  clearGroup();
 
   isEditMode = false;
   editorPanel.classList.add("hidden");
@@ -1967,9 +2067,7 @@ function applyEditMode() {
 
 function pushEditHistory() {
   editSession.historyStack.push(cloneAudioBuffer(editedAudioBuffer));
-  if (editSession.historyStack.length > 20) {
-    editSession.historyStack.shift();
-  }
+  if (editSession.historyStack.length > 20) editSession.historyStack.shift();
   undoBtn.disabled = editSession.historyStack.length === 0;
 }
 
@@ -1979,21 +2077,7 @@ function undoEditInSession() {
   undoBtn.disabled = editSession.historyStack.length === 0;
   drawEditWaveform();
   drawMainWaveform();
-  drawUnitWaveform();
   setStatus("1段階戻しました");
-}
-
-function editCanvasXToSample(x) {
-  if (!editedAudioBuffer || editSession.viewStartSample == null || editSession.viewEndSample == null) return 0;
-  const width = editCanvas.clientWidth;
-  const ratio = clamp(x / width, 0, 1);
-  return Math.floor(editSession.viewStartSample + ratio * (editSession.viewEndSample - editSession.viewStartSample));
-}
-
-function editCanvasYToAmplitude(y) {
-  const height = editCanvas.clientHeight;
-  const ratio = 1 - (y / height) * 2;
-  return clamp(ratio, -1, 1);
 }
 
 function applyDrawTool(sampleCenter, ampTarget) {
@@ -2069,19 +2153,14 @@ function applyEditToolAt(x, y) {
   const amp = editCanvasYToAmplitude(y);
   const tool = toolSelect.value;
 
-  if (tool === "draw") {
-    applyDrawTool(sample, amp);
-  } else if (tool === "smooth") {
-    applySmoothTool(sample);
-  } else if (tool === "gain") {
-    applyGainTool(sample);
-  } else if (tool === "erase") {
-    applyEraseTool(sample);
-  }
+  if (tool === "draw") applyDrawTool(sample, amp);
+  else if (tool === "smooth") applySmoothTool(sample);
+  else if (tool === "gain") applyGainTool(sample);
+  else if (tool === "erase") applyEraseTool(sample);
 }
 
 // ------------------------------
-// Selection export
+// Save / export
 // ------------------------------
 function createSelectionAudioBuffer() {
   if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return null;
@@ -2089,7 +2168,6 @@ function createSelectionAudioBuffer() {
   const startSample = Math.min(selectionStart, selectionEnd);
   const endSample = Math.max(selectionStart, selectionEnd);
   const length = endSample - startSample;
-
   if (length <= 0) return null;
 
   const slicedBuffer = audioContext.createBuffer(
@@ -2107,9 +2185,6 @@ function createSelectionAudioBuffer() {
   return slicedBuffer;
 }
 
-// ------------------------------
-// Save / library
-// ------------------------------
 async function saveCurrentMaterial(asEditedCopy = false) {
   if (!originalAudioBuffer || !editedAudioBuffer) return;
 
@@ -2137,7 +2212,6 @@ async function loadMaterialFromDB(id) {
     if (!item) return;
 
     await unlockAudio();
-
     originalAudioBuffer = channelArraysToAudioBuffer(item.original);
     editedAudioBuffer = channelArraysToAudioBuffer(item.edited);
 
@@ -2146,7 +2220,9 @@ async function loadMaterialFromDB(id) {
     saveNameInput.value = currentMaterialName;
     fileInfoEl.textContent = `ライブラリ: ${item.name}`;
 
-    clearAnalysis();
+    analysisState.continuousRegions = [];
+    analysisState.transientEvents = [];
+    clearGroup();
     resetView();
     resetSelectionDefault();
     stopPlayback();
@@ -2163,6 +2239,7 @@ async function loadMaterialFromDB(id) {
     editSession.snapshotBeforeEdit = null;
 
     setEditInteractionMode("navigate");
+    setUnitEditMode("navigate");
     updatePrecisionButton();
     updateOverlayButton();
 
@@ -2197,7 +2274,6 @@ async function duplicateMaterial(id) {
 async function deleteMaterial(id) {
   const ok = confirm("この素材を削除しますか？");
   if (!ok) return;
-
   await dbDeleteMaterial(id);
   setStatus("素材を削除しました");
   await refreshLibrary();
@@ -2240,13 +2316,8 @@ async function refreshLibrary() {
   }
 }
 
-// ------------------------------
-// Export WAV
-// ------------------------------
 function writeString(view, offset, str) {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i));
-  }
+  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
 }
 
 function audioBufferToWavBlob(buffer) {
@@ -2275,9 +2346,7 @@ function audioBufferToWavBlob(buffer) {
 
   let offset = 44;
   const channels = [];
-  for (let ch = 0; ch < numChannels; ch++) {
-    channels.push(buffer.getChannelData(ch));
-  }
+  for (let ch = 0; ch < numChannels; ch++) channels.push(buffer.getChannelData(ch));
 
   for (let i = 0; i < buffer.length; i++) {
     for (let ch = 0; ch < numChannels; ch++) {
@@ -2300,14 +2369,12 @@ function exportEditedWav() {
   a.href = url;
   a.download = `${saveNameInput.value.trim() || "edited_voice"}.wav`;
   a.click();
-
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   setStatus("WAVを書き出しました");
 }
 
 function exportSelectionWav() {
   if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
-
   const selectionBuffer = createSelectionAudioBuffer();
   if (!selectionBuffer) {
     alert("選択範囲が正しくありません。");
@@ -2332,6 +2399,15 @@ function exportSelectionWav() {
 // ------------------------------
 // UI state
 // ------------------------------
+function updateAnalysisButtons() {
+  playContinuousBtn.disabled = !analysisState.continuousRegions.length;
+  playTransientBtn.disabled = !analysisState.transientEvents.length;
+  clearAnalysisBtn.disabled =
+    !analysisState.continuousRegions.length &&
+    !analysisState.transientEvents.length &&
+    !groupState.cycleCount;
+}
+
 function updateMainUIState() {
   const hasAudio = !!editedAudioBuffer;
   const hasSelection = hasAudio && selectionStart != null && selectionEnd != null;
@@ -2386,14 +2462,16 @@ function updateMainUIState() {
   const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
   loopToggleBtn.textContent = label;
   editLoopToggleBtn.textContent = label;
+
   updatePlaybackInfoText();
   updatePrecisionButton();
   updateOverlayButton();
   updateAnalysisButtons();
+  updateGroupButtons();
 }
 
 // ------------------------------
-// Main canvas gesture handlers
+// Main canvas interaction
 // ------------------------------
 mainCanvas.addEventListener("pointerdown", async (event) => {
   if (!editedAudioBuffer || isEditMode) return;
@@ -2415,7 +2493,6 @@ mainCanvas.addEventListener("pointerdown", async (event) => {
       draggingSelectionHandle = "start";
       return;
     }
-
     if (ex != null && Math.abs(x - ex) <= selectionHandleThresholdPx) {
       draggingSelectionHandle = "end";
       return;
@@ -2452,7 +2529,7 @@ mainCanvas.addEventListener("pointermove", (event) => {
         selectionEnd = tmp;
         draggingSelectionHandle = "end";
       }
-    } else if (draggingSelectionHandle === "end") {
+    } else {
       selectionEnd = clamp(sample, 0, editedAudioBuffer.length);
       if (selectionStart != null && selectionEnd < selectionStart) {
         const tmp = selectionEnd;
@@ -2468,11 +2545,9 @@ mainCanvas.addEventListener("pointermove", (event) => {
   }
 
   if (pointers.length === 1) {
-    const currentX = pointers[0].x;
-    const dx = currentX - panLastCenterX;
-
+    const dx = pointers[0].x - panLastCenterX;
     if (Math.abs(dx) > 2) singlePointerMoved = true;
-    panLastCenterX = currentX;
+    panLastCenterX = pointers[0].x;
 
     const samplesPerPx = (viewEnd - viewStart) / Math.max(1, mainCanvas.clientWidth);
     const shiftSamples = Math.round(-dx * samplesPerPx);
@@ -2535,9 +2610,7 @@ mainCanvas.addEventListener("pointerup", (event) => {
   mainPointerState.delete(event.pointerId);
 
   const wasDraggingHandle = draggingSelectionHandle !== null;
-  if (mainPointerState.size === 0) {
-    draggingSelectionHandle = null;
-  }
+  if (mainPointerState.size === 0) draggingSelectionHandle = null;
 
   if (!editedAudioBuffer || isEditMode || !pos) return;
   if (wasDraggingHandle || singlePointerMoved) return;
@@ -2545,8 +2618,7 @@ mainCanvas.addEventListener("pointerup", (event) => {
   const now = performance.now();
   if (now - lastTapTime < 350 && Math.abs(pos.x - lastTapX) < 24) {
     const sample = mainCanvasXToSample(pos.x);
-    const sec = sample / editedAudioBuffer.sampleRate;
-    seekTo(sec);
+    seekTo(sample / editedAudioBuffer.sampleRate);
   }
 
   lastTapTime = now;
@@ -2555,13 +2627,11 @@ mainCanvas.addEventListener("pointerup", (event) => {
 
 mainCanvas.addEventListener("pointercancel", (event) => {
   mainPointerState.delete(event.pointerId);
-  if (mainPointerState.size === 0) {
-    draggingSelectionHandle = null;
-  }
+  if (mainPointerState.size === 0) draggingSelectionHandle = null;
 });
 
 // ------------------------------
-// Edit canvas gesture handlers
+// Edit canvas interaction
 // ------------------------------
 editCanvas.addEventListener("pointerdown", async (event) => {
   if (!isEditMode || !editedAudioBuffer) return;
@@ -2579,7 +2649,6 @@ editCanvas.addEventListener("pointerdown", async (event) => {
     isEditPointerDown = true;
     editLastX = pos.x;
     editLastY = pos.y;
-
     pushEditHistory();
     applyEditToolAt(pos.x, pos.y);
     drawEditWaveform();
@@ -2685,16 +2754,14 @@ editCanvas.addEventListener("pointermove", (event) => {
 editCanvas.addEventListener("pointerup", (event) => {
   const pos = editPointerState.get(event.pointerId);
   editPointerState.delete(event.pointerId);
-
-  if (editPointerState.size === 0) {
-    isEditPointerDown = false;
-  }
+  if (editPointerState.size === 0) isEditPointerDown = false;
 
   if (!isEditMode || !editedAudioBuffer || !pos) return;
   if (editSession.interactionMode !== "navigate") return;
 
   const sample = editCanvasXToSample(pos.x);
 
+  // transient tap priority
   let nearestTransient = null;
   let nearestTransientDist = Infinity;
   for (const ev of analysisState.transientEvents) {
@@ -2706,29 +2773,71 @@ editCanvas.addEventListener("pointerup", (event) => {
   }
 
   const transientThreshold = Math.floor(editedAudioBuffer.sampleRate * 0.015);
-
   if (nearestTransient && nearestTransientDist <= transientThreshold) {
-    selectTransientUnitAt(nearestTransient.sample);
-    drawEditWaveform();
-    updateAnalysisButtons();
+    clearGroup();
+    groupInfoText.textContent = "周期グループ: 瞬時イベント上では未使用";
+    unitInfoText.textContent = "代表周期: 瞬時イベントです";
+    drawUnitWaveform();
     return;
   }
 
-  for (const region of analysisState.continuousRegions) {
-    if (sample >= region.startSample && sample <= region.endSample) {
-      selectContinuousUnitAt(sample);
-      drawEditWaveform();
-      updateAnalysisButtons();
-      return;
-    }
+  if (tryBuildGroupFromTap(sample)) {
+    updateAnalysisButtons();
+    updateGroupButtons();
   }
 });
 
 editCanvas.addEventListener("pointercancel", (event) => {
   editPointerState.delete(event.pointerId);
-  if (editPointerState.size === 0) {
-    isEditPointerDown = false;
+  if (editPointerState.size === 0) isEditPointerDown = false;
+});
+
+// ------------------------------
+// Unit canvas interaction
+// ------------------------------
+unitWaveCanvas.addEventListener("pointerdown", async (event) => {
+  if (!groupState.unitEdited) return;
+  await unlockAudio();
+
+  if (unitEditorState.mode !== "draw") return;
+
+  const pos = getUnitCanvasLocalPos(event);
+  unitWaveCanvas.setPointerCapture(event.pointerId);
+
+  unitEditorState.isPointerDown = true;
+  unitEditorState.lastX = pos.x;
+  unitEditorState.lastY = pos.y;
+
+  applyUnitBrushAt(pos.x, pos.y);
+  drawUnitWaveform();
+});
+
+unitWaveCanvas.addEventListener("pointermove", (event) => {
+  if (!groupState.unitEdited) return;
+  if (!unitEditorState.isPointerDown || unitEditorState.mode !== "draw") return;
+
+  const pos = getUnitCanvasLocalPos(event);
+  const x = pos.x;
+  const y = pos.y;
+
+  const steps = 8;
+  for (let i = 1; i <= steps; i++) {
+    const ix = unitEditorState.lastX + (x - unitEditorState.lastX) * (i / steps);
+    const iy = unitEditorState.lastY + (y - unitEditorState.lastY) * (i / steps);
+    applyUnitBrushAt(ix, iy);
   }
+
+  unitEditorState.lastX = x;
+  unitEditorState.lastY = y;
+  drawUnitWaveform();
+});
+
+unitWaveCanvas.addEventListener("pointerup", () => {
+  unitEditorState.isPointerDown = false;
+});
+
+unitWaveCanvas.addEventListener("pointercancel", () => {
+  unitEditorState.isPointerDown = false;
 });
 
 // ------------------------------
@@ -2747,115 +2856,57 @@ seekBar.addEventListener("input", () => {
 
 seekBar.addEventListener("change", () => {
   if (!editedAudioBuffer) return;
-  const sec = parseFloat(seekBar.value) * editedAudioBuffer.duration;
   isSeeking = false;
-  seekTo(sec);
+  seekTo(parseFloat(seekBar.value) * editedAudioBuffer.duration);
 });
 
 // ------------------------------
 // Buttons
 // ------------------------------
-recordBtn.addEventListener("click", async () => {
-  if (!mediaRecorder || mediaRecorder.state === "inactive") {
-    await startRecording();
-  } else {
-    stopRecording();
-  }
-});
+playBtn.addEventListener("click", playCurrent);
+pauseBtn.addEventListener("click", pausePlayback);
+stopBtn.addEventListener("click", () => stopPlayback(false));
+rewindBtn.addEventListener("click", () => skipBy(-10));
+forwardBtn.addEventListener("click", () => skipBy(10));
+loopToggleBtn.addEventListener("click", toggleLoop);
+editLoopToggleBtn.addEventListener("click", toggleLoop);
 
-playBtn.addEventListener("click", async () => {
-  await playCurrent();
-});
-
-pauseBtn.addEventListener("click", () => {
-  pausePlayback();
-});
-
-stopBtn.addEventListener("click", () => {
-  stopPlayback(false);
-});
-
-rewindBtn.addEventListener("click", () => {
-  skipBy(-10);
-});
-
-forwardBtn.addEventListener("click", () => {
-  skipBy(10);
-});
-
-loopToggleBtn.addEventListener("click", () => {
-  toggleLoop();
-});
-
-editLoopToggleBtn.addEventListener("click", () => {
-  toggleLoop();
-});
-
-playSelectionBtn.addEventListener("click", async () => {
-  await playSelection();
-});
-
-saveSelectionWavBtn.addEventListener("click", () => {
-  exportSelectionWav();
-});
-
-analyzeSelectionBtn.addEventListener("click", () => {
-  analyzeSelectedRegion();
-});
-
-playContinuousBtn.addEventListener("click", async () => {
-  await playContinuousRegions();
-});
-
-playTransientBtn.addEventListener("click", async () => {
-  await playTransientEvents();
-});
-
+playSelectionBtn.addEventListener("click", playSelection);
+saveSelectionWavBtn.addEventListener("click", exportSelectionWav);
+analyzeSelectionBtn.addEventListener("click", analyzeSelectedRegion);
+playContinuousBtn.addEventListener("click", playContinuousRegions);
+playTransientBtn.addEventListener("click", playTransientEvents);
 clearAnalysisBtn.addEventListener("click", () => {
-  clearAnalysis();
+  analysisState.continuousRegions = [];
+  analysisState.transientEvents = [];
+  clearGroup();
+  updateAnalysisButtons();
+  drawEditWaveform();
+  setStatus("解析表示を消しました");
 });
 
-playUnitBtn.addEventListener("click", async () => {
-  await playSelectedUnit();
+playUnitBtn.addEventListener("click", playSelectedUnit);
+groupPlayBtn.addEventListener("click", playGroup);
+clearGroupBtn.addEventListener("click", clearGroup);
+unitEditModeBtn.addEventListener("click", () => {
+  setUnitEditMode(unitEditorState.mode === "navigate" ? "draw" : "navigate");
 });
+applyUnitToGroupBtn.addEventListener("click", applyUnitEditsToGroup);
 
-editPlayBtn.addEventListener("click", async () => {
-  await playEditRange();
-});
+editPlayBtn.addEventListener("click", playEditRange);
+editPauseBtn.addEventListener("click", pausePlayback);
+editStopBtn.addEventListener("click", () => stopPlayback(false));
 
-editPauseBtn.addEventListener("click", () => {
-  pausePlayback();
-});
-
-editStopBtn.addEventListener("click", () => {
-  stopPlayback(false);
-});
-
-scrollLeftBtn.addEventListener("click", () => {
-  scrollView(-1);
-});
-
-scrollRightBtn.addEventListener("click", () => {
-  scrollView(1);
-});
-
-zoomInBtn.addEventListener("click", () => {
-  zoomView(0.5);
-});
-
-zoomOutBtn.addEventListener("click", () => {
-  zoomView(2.0);
-});
-
+scrollLeftBtn.addEventListener("click", () => scrollView(-1));
+scrollRightBtn.addEventListener("click", () => scrollView(1));
+zoomInBtn.addEventListener("click", () => zoomView(0.5));
+zoomOutBtn.addEventListener("click", () => zoomView(2.0));
 fullViewBtn.addEventListener("click", () => {
   resetView();
   drawMainWaveform();
 });
 
-zoomToSelectionBtn.addEventListener("click", () => {
-  zoomToSelection();
-});
-
+zoomToSelectionBtn.addEventListener("click", zoomToSelection);
 resetSelectionBtn.addEventListener("click", () => {
   resetSelectionDefault();
   drawMainWaveform();
@@ -2869,24 +2920,12 @@ openEditorBtn.addEventListener("click", () => {
 });
 
 editModeToggleBtn.addEventListener("click", () => {
-  if (editSession.interactionMode === "navigate") {
-    setEditInteractionMode("draw");
-  } else {
-    setEditInteractionMode("navigate");
-  }
+  setEditInteractionMode(editSession.interactionMode === "navigate" ? "draw" : "navigate");
 });
 
-editZoomInBtn.addEventListener("click", () => {
-  zoomEditView(0.5);
-});
-
-editZoomOutBtn.addEventListener("click", () => {
-  zoomEditView(2.0);
-});
-
-editFullViewBtn.addEventListener("click", () => {
-  resetEditView();
-});
+editZoomInBtn.addEventListener("click", () => zoomEditView(0.5));
+editZoomOutBtn.addEventListener("click", () => zoomEditView(2.0));
+editFullViewBtn.addEventListener("click", resetEditView);
 
 precisionToggleBtn.addEventListener("click", () => {
   editSession.precisionMode = !editSession.precisionMode;
@@ -2898,50 +2937,32 @@ overlayModeBtn.addEventListener("click", () => {
   if (editSession.overlayMode === "overlay") editSession.overlayMode = "edited";
   else if (editSession.overlayMode === "edited") editSession.overlayMode = "original";
   else editSession.overlayMode = "overlay";
-
   updateOverlayButton();
   drawEditWaveform();
 });
 
-undoBtn.addEventListener("click", () => {
-  undoEditInSession();
-});
-
+undoBtn.addEventListener("click", undoEditInSession);
 cancelEditBtn.addEventListener("click", () => {
   cancelEditMode();
   updateMainUIState();
 });
-
 applyEditBtn.addEventListener("click", () => {
   applyEditMode();
   updateMainUIState();
 });
-
-saveWavBtn.addEventListener("click", () => {
-  exportEditedWav();
-});
+saveWavBtn.addEventListener("click", exportEditedWav);
 
 saveCurrentBtn.addEventListener("click", async () => {
-  try {
-    await saveCurrentMaterial(false);
-  } catch (err) {
-    console.error(err);
-    alert("保存に失敗しました。");
-  }
+  try { await saveCurrentMaterial(false); }
+  catch (err) { console.error(err); alert("保存に失敗しました。"); }
 });
 
 saveEditedAsBtn.addEventListener("click", async () => {
-  try {
-    await saveCurrentMaterial(true);
-  } catch (err) {
-    console.error(err);
-    alert("編集版保存に失敗しました。");
-  }
+  try { await saveCurrentMaterial(true); }
+  catch (err) { console.error(err); alert("編集版保存に失敗しました。"); }
 });
 
-refreshLibraryBtn.addEventListener("click", async () => {
-  await refreshLibrary();
-});
+refreshLibraryBtn.addEventListener("click", refreshLibrary);
 
 libraryList.addEventListener("click", async (event) => {
   const btn = event.target.closest("button[data-action]");
@@ -2951,13 +2972,9 @@ libraryList.addEventListener("click", async (event) => {
   const id = btn.dataset.id;
   if (!id) return;
 
-  if (action === "load") {
-    await loadMaterialFromDB(id);
-  } else if (action === "duplicate") {
-    await duplicateMaterial(id);
-  } else if (action === "delete") {
-    await deleteMaterial(id);
-  }
+  if (action === "load") await loadMaterialFromDB(id);
+  else if (action === "duplicate") await duplicateMaterial(id);
+  else if (action === "delete") await deleteMaterial(id);
 });
 
 // ------------------------------
@@ -2966,6 +2983,7 @@ libraryList.addEventListener("click", async (event) => {
 function init() {
   bootStatus();
   setEditInteractionMode("navigate");
+  setUnitEditMode("navigate");
   updatePrecisionButton();
   updateOverlayButton();
   updateMainUIState();
