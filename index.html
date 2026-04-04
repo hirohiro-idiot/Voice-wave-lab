@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wave Voice Lab v5.0</title>
+  <title>Wave Voice Lab v5.1</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <h1>Wave Voice Lab v5.0</h1>
-      <p class="subtitle">周期グループ抽出・代表1周期編集・全周期一括反映</p>
+      <h1>Wave Voice Lab v5.1</h1>
+      <p class="subtitle">周期グループ編集専用版</p>
     </header>
 
     <main class="main">
@@ -123,7 +123,7 @@
 
         <div class="row small-row">
           <span id="editorRangeInfo">編集範囲: -</span>
-          <span id="editorHint">この範囲だけ編集できます</span>
+          <span>この範囲だけ解析・編集できます</span>
         </div>
 
         <div class="canvas-wrap editor-canvas-wrap">
@@ -138,13 +138,9 @@
         </div>
 
         <div class="row controls-row">
-          <button id="editModeToggleBtn">表示操作中（タップで編集操作へ）</button>
           <button id="editZoomInBtn">編集拡大</button>
           <button id="editZoomOutBtn">編集縮小</button>
           <button id="editFullViewBtn">範囲全体表示</button>
-        </div>
-
-        <div class="row controls-row">
           <button id="precisionToggleBtn">精密表示: OFF</button>
           <button id="overlayModeBtn">表示: 重ね</button>
         </div>
@@ -152,34 +148,10 @@
         <div class="row controls-row">
           <button id="analyzeSelectionBtn">この編集範囲を解析</button>
           <button id="playContinuousBtn" disabled>連続区間を再生</button>
-          <button id="playTransientBtn" disabled>瞬時イベントを再生</button>
           <button id="clearAnalysisBtn" disabled>解析表示を消す</button>
         </div>
 
-        <div class="editor-row">
-          <label for="toolSelect">通常編集ツール</label>
-          <select id="toolSelect">
-            <option value="draw">Draw（上下変形）</option>
-            <option value="smooth">Smooth（なめらか化）</option>
-            <option value="gain">Gain（局所音量アップ）</option>
-            <option value="erase">Erase（局所音量ダウン）</option>
-          </select>
-        </div>
-
-        <div class="editor-row">
-          <label for="brushSize">通常ブラシ幅</label>
-          <input type="range" id="brushSize" min="5" max="300" value="60" />
-          <span id="brushSizeValue">60</span>
-        </div>
-
-        <div class="editor-row">
-          <label for="strength">通常強さ</label>
-          <input type="range" id="strength" min="1" max="100" value="30" />
-          <span id="strengthValue">30</span>
-        </div>
-
         <div class="row controls-row">
-          <button id="undoBtn" disabled>元に戻す</button>
           <button id="cancelEditBtn">キャンセル</button>
           <button id="applyEditBtn">編集確定</button>
           <button id="saveWavBtn" disabled>WAV保存</button>
@@ -225,13 +197,13 @@
         </div>
 
         <p class="hint">
-          表示操作モードで編集画面の解析結果をタップすると、周期グループ候補を抽出します。<br>
-          その後、下段の代表周期を編集し、「代表周期の編集を全周期へ反映」でまとめて適用できます。
+          緑帯の中をタップすると、その場所から周期グループ抽出を試みます。<br>
+          下段の代表周期を編集して、全周期へ反映できます。
         </p>
       </section>
     </main>
   </div>
 
-  <script src="script.js?v=500"></script>
+  <script src="script.js?v=510"></script>
 </body>
 </html>
