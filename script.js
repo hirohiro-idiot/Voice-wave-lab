@@ -1,6 +1,6 @@
 // =====================================================
-// Wave Voice Lab v5.1
-// 周期グループ編集専用版
+// Wave Voice Lab v5.2
+// 周期グループ編集専用版 / 再生だけ <audio> 要素方式
 // =====================================================
 
 // ------------------------------
@@ -89,6 +89,8 @@ const editCtx = editCanvas.getContext("2d");
 const unitWaveCanvas = document.getElementById("unitWaveCanvas");
 const unitWaveCtx = unitWaveCanvas.getContext("2d");
 
+const playerAudio = document.getElementById("playerAudio");
+
 // ------------------------------
 // Audio state
 // ------------------------------
@@ -99,14 +101,13 @@ let recordedChunks = [];
 let recordingStartTime = 0;
 let recordingTimerId = null;
 
-let currentSourceNode = null;
-let currentGainNode = null;
-
 let originalAudioBuffer = null;
 let editedAudioBuffer = null;
 
 let currentMaterialName = "";
 let currentMaterialSource = "";
+
+let currentPlaybackUrl = null;
 
 let playerState = {
   isPlaying: false,
@@ -202,7 +203,7 @@ let dpr = Math.max(1, window.devicePixelRatio || 1);
 // ------------------------------
 // IndexedDB
 // ------------------------------
-const DB_NAME = "wave_voice_lab_db_v510";
+const DB_NAME = "wave_voice_lab_db_v520";
 const DB_VERSION = 1;
 const STORE_NAME = "materials";
 
@@ -372,6 +373,9 @@ function updateSpeedLabels() {
   const rate = parseFloat(speedSlider.value);
   speedLabel.textContent = `${rate.toFixed(2)}x`;
   playerState.playbackRate = rate;
+  try {
+    playerAudio.playbackRate = rate;
+  } catch (_) {}
   updatePlaybackInfoText();
 }
 
@@ -418,11 +422,9 @@ function updateOverlayButton() {
 function isAllowedAudioFile(file) {
   const name = (file.name || "").toLowerCase();
   const type = (file.type || "").toLowerCase();
-
   const allowedExt = [".wav", ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".flac", ".aif", ".aiff", ".webm"];
   const hasAllowedExt = allowedExt.some(ext => name.endsWith(ext));
   const isAudioMime = type.startsWith("audio/");
-
   return hasAllowedExt || isAudioMime;
 }
 
@@ -509,6 +511,27 @@ function channelArraysToAudioBuffer(data) {
     buffer.getChannelData(ch).set(new Float32Array(data.channels[ch]));
   }
   return buffer;
+}
+
+function createSubBuffer(buffer, startSec, endSec) {
+  const sampleRate = buffer.sampleRate;
+  const startSample = Math.max(0, Math.floor(startSec * sampleRate));
+  const endSample = Math.min(buffer.length, Math.floor(endSec * sampleRate));
+  const length = Math.max(0, endSample - startSample);
+
+  const sub = audioContext.createBuffer(
+    buffer.numberOfChannels,
+    length,
+    sampleRate
+  );
+
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dst = sub.getChannelData(ch);
+    dst.set(src.slice(startSample, endSample));
+  }
+
+  return sub;
 }
 
 // ------------------------------
@@ -728,7 +751,6 @@ function analyzeSelectedRegion() {
     analysisState.continuousRegions.push(currentRegion);
   }
 
-  // 瞬時イベントは表示だけ
   for (let i = 1; i < frames.length; i++) {
     const prev = frames[i - 1];
     const cur = frames[i];
@@ -964,214 +986,434 @@ function applyUnitBrushAt(x, y) {
   }
 }
 
-function drawUnitWaveform() {
-  const width = unitWaveCanvas.clientWidth;
-  const height = unitWaveCanvas.clientHeight;
-
-  unitWaveCtx.clearRect(0, 0, width, height);
-  unitWaveCtx.fillStyle = "#fafafa";
-  unitWaveCtx.fillRect(0, 0, width, height);
-
-  unitWaveCtx.strokeStyle = "#d0d0d0";
-  unitWaveCtx.lineWidth = 1;
-  unitWaveCtx.beginPath();
-  unitWaveCtx.moveTo(0, height / 2);
-  unitWaveCtx.lineTo(width, height / 2);
-  unitWaveCtx.stroke();
-
-  if (!groupState.unitEdited || !groupState.unitOriginal) {
-    unitWaveCtx.fillStyle = "#888";
-    unitWaveCtx.font = "14px sans-serif";
-    unitWaveCtx.fillText("周期グループを抽出すると代表周期がここに表示されます", 16, height / 2 - 8);
+// ------------------------------
+// Edit mode
+// ------------------------------
+function updateEditorInfo() {
+  if (editSession.startSample == null || editSession.endSample == null || !editedAudioBuffer) {
+    editorRangeInfo.textContent = "編集範囲: -";
     return;
   }
 
-  const orig = groupState.unitOriginal;
-  const edited = groupState.unitEdited;
-
-  unitWaveCtx.strokeStyle = "rgba(220,40,40,0.85)";
-  unitWaveCtx.lineWidth = 1.2;
-  unitWaveCtx.beginPath();
-  for (let i = 0; i < orig.length; i++) {
-    const x = (i / Math.max(1, orig.length - 1)) * width;
-    const y = ((1 - orig[i]) * 0.5) * height;
-    if (i === 0) unitWaveCtx.moveTo(x, y);
-    else unitWaveCtx.lineTo(x, y);
-  }
-  unitWaveCtx.stroke();
-
-  unitWaveCtx.strokeStyle = "rgba(20,20,20,0.98)";
-  unitWaveCtx.lineWidth = 1.8;
-  unitWaveCtx.beginPath();
-  for (let i = 0; i < edited.length; i++) {
-    const x = (i / Math.max(1, edited.length - 1)) * width;
-    const y = ((1 - edited[i]) * 0.5) * height;
-    if (i === 0) unitWaveCtx.moveTo(x, y);
-    else unitWaveCtx.lineTo(x, y);
-  }
-  unitWaveCtx.stroke();
+  const s = editSession.startSample / editedAudioBuffer.sampleRate;
+  const e = editSession.endSample / editedAudioBuffer.sampleRate;
+  editorRangeInfo.textContent = `編集範囲: ${s.toFixed(4)}s ～ ${e.toFixed(4)}s`;
 }
 
-// ------------------------------
-// Loading audio
-// ------------------------------
-async function decodeFileToAudioBuffer(file) {
-  await unlockAudio();
-  const arrayBuffer = await file.arrayBuffer();
-  return await audioContext.decodeAudioData(arrayBuffer.slice(0));
-}
+function openEditMode() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
 
-function resetSelectionDefault() {
-  if (!editedAudioBuffer) {
-    selectionStart = null;
-    selectionEnd = null;
+  const s = Math.min(selectionStart, selectionEnd);
+  const e = Math.max(selectionStart, selectionEnd);
+  if (e - s < 2) {
+    alert("編集範囲が短すぎます。");
     return;
   }
 
-  const len = editedAudioBuffer.length;
-  selectionStart = Math.floor(len * 0.25);
-  selectionEnd = Math.floor(len * 0.35);
-  updateSelectionInfo();
-}
+  editSession.startSample = s;
+  editSession.endSample = e;
+  editSession.viewStartSample = s;
+  editSession.viewEndSample = e;
+  editSession.precisionMode = false;
+  editSession.overlayMode = "overlay";
+  editSession.snapshotBeforeEdit = cloneAudioBuffer(editedAudioBuffer);
 
-function loadDecodedBuffer(decoded, label = "読込完了", source = "") {
-  originalAudioBuffer = toMonoBuffer(decoded);
-  editedAudioBuffer = cloneAudioBuffer(originalAudioBuffer);
-
-  currentMaterialSource = source;
-  currentMaterialName = currentMaterialName || label;
-  saveNameInput.value = currentMaterialName;
-
-  analysisState.continuousRegions = [];
-  analysisState.transientEvents = [];
   clearGroup();
-  resetView();
-  resetSelectionDefault();
-  stopPlayback();
-  updateMainUIState();
+
+  isEditMode = true;
+  editorPanel.classList.remove("hidden");
+  playerState.lastMode = "edit";
+  setUnitEditMode("navigate");
+  updateEditorInfo();
+  updatePlaybackInfoText();
+  updatePrecisionButton();
+  updateOverlayButton();
+  drawEditWaveform();
+  drawUnitWaveform();
+  setStatus("編集モード");
+}
+
+function cancelEditMode() {
+  if (editSession.snapshotBeforeEdit) {
+    editedAudioBuffer = cloneAudioBuffer(editSession.snapshotBeforeEdit);
+  }
+
+  editSession.startSample = null;
+  editSession.endSample = null;
+  editSession.viewStartSample = null;
+  editSession.viewEndSample = null;
+  editSession.precisionMode = false;
+  editSession.overlayMode = "overlay";
+  editSession.snapshotBeforeEdit = null;
+
+  clearGroup();
+
+  isEditMode = false;
+  editorPanel.classList.add("hidden");
+  playerState.lastMode = "selection";
+  updatePrecisionButton();
+  updateOverlayButton();
+  updatePlaybackInfoText();
   drawMainWaveform();
   drawEditWaveform();
-  setStatus(label);
-  fileInfoEl.textContent = `${source}: ${currentMaterialName}`;
+  drawUnitWaveform();
+  setStatus("編集キャンセル");
 }
 
-async function handleFileLoad(file, sourceLabel = "音声ファイル") {
-  if (!file) return;
+function applyEditMode() {
+  editSession.startSample = null;
+  editSession.endSample = null;
+  editSession.viewStartSample = null;
+  editSession.viewEndSample = null;
+  editSession.precisionMode = false;
+  editSession.overlayMode = "overlay";
+  editSession.snapshotBeforeEdit = null;
 
-  currentMaterialName = file.name;
-  saveNameInput.value = file.name;
-  fileInfoEl.textContent = `${sourceLabel}: ${file.name} / ${file.type || "type不明"}`;
-  setStatus("ファイル読込中...");
+  clearGroup();
 
+  isEditMode = false;
+  editorPanel.classList.add("hidden");
+  playerState.lastMode = "selection";
+  updatePrecisionButton();
+  updateOverlayButton();
+  updatePlaybackInfoText();
+  drawMainWaveform();
+  drawEditWaveform();
+  drawUnitWaveform();
+  setStatus("編集確定");
+}
+
+// ------------------------------
+// Save / export
+// ------------------------------
+function createSelectionAudioBuffer() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return null;
+
+  const startSample = Math.min(selectionStart, selectionEnd);
+  const endSample = Math.max(selectionStart, selectionEnd);
+  const length = endSample - startSample;
+  if (length <= 0) return null;
+
+  const slicedBuffer = audioContext.createBuffer(
+    editedAudioBuffer.numberOfChannels,
+    length,
+    editedAudioBuffer.sampleRate
+  );
+
+  for (let ch = 0; ch < editedAudioBuffer.numberOfChannels; ch++) {
+    const sourceData = editedAudioBuffer.getChannelData(ch);
+    const targetData = slicedBuffer.getChannelData(ch);
+    targetData.set(sourceData.slice(startSample, endSample));
+  }
+
+  return slicedBuffer;
+}
+
+async function saveCurrentMaterial(asEditedCopy = false) {
+  if (!originalAudioBuffer || !editedAudioBuffer) return;
+
+  const baseName = saveNameInput.value.trim() || currentMaterialName || "untitled";
+  const finalName = asEditedCopy ? `${baseName}_edited_${Date.now()}` : baseName;
+
+  const material = {
+    id: generateId(),
+    name: finalName,
+    source: currentMaterialSource || "不明",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    original: audioBufferToChannelArrays(originalAudioBuffer),
+    edited: audioBufferToChannelArrays(editedAudioBuffer),
+  };
+
+  await dbPutMaterial(material);
+  setStatus(asEditedCopy ? "編集版を保存しました" : "保存しました");
+  await refreshLibrary();
+}
+
+async function loadMaterialFromDB(id) {
   try {
-    const decoded = await decodeFileToAudioBuffer(file);
-    loadDecodedBuffer(decoded, `${sourceLabel}読込完了`, sourceLabel);
+    const item = await dbGetMaterial(id);
+    if (!item) return;
+
+    await unlockAudio();
+    originalAudioBuffer = channelArraysToAudioBuffer(item.original);
+    editedAudioBuffer = channelArraysToAudioBuffer(item.edited);
+
+    currentMaterialName = item.name || "";
+    currentMaterialSource = item.source || "";
+    saveNameInput.value = currentMaterialName;
+    fileInfoEl.textContent = `ライブラリ: ${item.name}`;
+
+    analysisState.continuousRegions = [];
+    analysisState.transientEvents = [];
+    clearGroup();
+    resetView();
+    resetSelectionDefault();
+    stopPlayback();
+
+    isEditMode = false;
+    editorPanel.classList.add("hidden");
+    editSession.startSample = null;
+    editSession.endSample = null;
+    editSession.viewStartSample = null;
+    editSession.viewEndSample = null;
+    editSession.precisionMode = false;
+    editSession.overlayMode = "overlay";
+    editSession.snapshotBeforeEdit = null;
+
+    setUnitEditMode("navigate");
+    updatePrecisionButton();
+    updateOverlayButton();
+
+    drawMainWaveform();
+    drawEditWaveform();
+    drawUnitWaveform();
+    updateMainUIState();
+    setStatus("素材を読み込みました");
   } catch (err) {
     console.error(err);
-    setStatus("ファイル読込失敗");
-    alert("読み込みに失敗しました。mp3 / wav / m4a などで試してください。");
+    alert("保存済み素材の読み込みに失敗しました。");
   }
 }
 
-window.handleAudioFileInline = async function (event) {
-  const file = event.target.files && event.target.files[0];
-  if (!file) return;
+async function duplicateMaterial(id) {
+  const item = await dbGetMaterial(id);
+  if (!item) return;
 
-  if (!isAllowedAudioFile(file)) {
-    alert("音声ファイルのみ選択できます。");
-    fileInfoEl.textContent = "音声以外のファイルは読み込めません";
-    setStatus("音声ファイルを選択してください");
-    event.target.value = "";
+  const duplicated = {
+    ...item,
+    id: generateId(),
+    name: `${item.name}_copy`,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  await dbPutMaterial(duplicated);
+  setStatus("素材を複製しました");
+  await refreshLibrary();
+}
+
+async function deleteMaterial(id) {
+  const ok = confirm("この素材を削除しますか？");
+  if (!ok) return;
+  await dbDeleteMaterial(id);
+  setStatus("素材を削除しました");
+  await refreshLibrary();
+}
+
+async function refreshLibrary() {
+  try {
+    const items = await dbGetAllMaterials();
+
+    if (!items.length) {
+      libraryList.innerHTML = `<div class="library-item"><div class="library-meta">保存済み素材はありません。</div></div>`;
+      return;
+    }
+
+    libraryList.innerHTML = items.map(item => {
+      const durSec = item.edited?.sampleRate ? (item.edited.length / item.edited.sampleRate).toFixed(2) : "-";
+      return `
+        <div class="library-item">
+          <div class="library-item-head">
+            <div>
+              <div class="library-title">${escapeHtml(item.name || "(no name)")}</div>
+              <div class="library-meta">
+                種別: ${escapeHtml(item.source || "-")}<br>
+                長さ: ${durSec}s<br>
+                更新: ${escapeHtml(formatDate(item.updatedAt))}
+              </div>
+            </div>
+          </div>
+          <div class="library-actions">
+            <button data-action="load" data-id="${item.id}">読み込み</button>
+            <button data-action="duplicate" data-id="${item.id}">複製</button>
+            <button data-action="delete" data-id="${item.id}">削除</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+  } catch (err) {
+    console.error(err);
+    libraryList.innerHTML = `<div class="library-item"><div class="library-meta">ライブラリ読込に失敗しました。</div></div>`;
+  }
+}
+
+function writeString(view, offset, str) {
+  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+}
+
+function audioBufferToWavBlob(buffer) {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const bitDepth = 16;
+  const blockAlign = (numChannels * bitDepth) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = buffer.length * blockAlign;
+  const arrayBuffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(arrayBuffer);
+
+  writeString(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(view, 8, "WAVE");
+  writeString(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+  writeString(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  const channels = [];
+  for (let ch = 0; ch < numChannels; ch++) channels.push(buffer.getChannelData(ch));
+
+  for (let i = 0; i < buffer.length; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      let sample = clamp(channels[ch][i], -1, 1);
+      sample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      view.setInt16(offset, sample, true);
+      offset += 2;
+    }
+  }
+
+  return new Blob([arrayBuffer], { type: "audio/wav" });
+}
+
+function exportEditedWav() {
+  if (!editedAudioBuffer) return;
+
+  const blob = audioBufferToWavBlob(editedAudioBuffer);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${saveNameInput.value.trim() || "edited_voice"}.wav`;
+  a.click();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("WAVを書き出しました");
+}
+
+function exportSelectionWav() {
+  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
+
+  const selectionBuffer = createSelectionAudioBuffer();
+  if (!selectionBuffer) {
+    alert("選択範囲が正しくありません。");
     return;
   }
 
-  fileInfoEl.textContent = `音声ファイル: ${file.name} / ${file.type || "type不明"}`;
-  setStatus("ファイル読込中...");
+  const blob = audioBufferToWavBlob(selectionBuffer);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+
+  const startSec = (Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate).toFixed(4);
+  const endSec = (Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate).toFixed(4);
+
+  a.href = url;
+  a.download = `${saveNameInput.value.trim() || "selection"}_${startSec}s-${endSec}s.wav`;
+  a.click();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("選択範囲を書き出しました");
+}
+
+// ------------------------------
+// Playback helpers (<audio>)
+// ------------------------------
+function cleanupPlaybackUrl() {
+  if (currentPlaybackUrl) {
+    URL.revokeObjectURL(currentPlaybackUrl);
+    currentPlaybackUrl = null;
+  }
+}
+
+function stopCurrentSourceOnly() {
+  try {
+    playerAudio.pause();
+  } catch (_) {}
+
+  cleanupPlaybackUrl();
 
   try {
-    await handleFileLoad(file, "音声ファイル");
-  } catch (err) {
-    console.error(err);
-    setStatus("ファイル読込失敗");
-    alert("ファイルの読み込みに失敗しました。");
-  }
+    playerAudio.removeAttribute("src");
+    playerAudio.load();
+  } catch (_) {}
+}
 
-  event.target.value = "";
-};
+async function playBufferRangeWithAudioElement(buffer, startSec, endSec, mode = "full") {
+  if (!buffer) return;
 
-// ------------------------------
-// Recording
-// ------------------------------
-async function startRecording() {
+  cleanupPlaybackUrl();
+
+  const subBuffer = createSubBuffer(buffer, startSec, endSec);
+  const blob = audioBufferToWavBlob(subBuffer);
+  const url = URL.createObjectURL(blob);
+  currentPlaybackUrl = url;
+
+  playerAudio.src = url;
+  playerAudio.playbackRate = playerState.playbackRate;
+  playerAudio.currentTime = 0;
+
+  playerState.isPlaying = true;
+  playerState.mode = mode;
+  playerState.lastMode = mode;
+  playerState.playStartSec = startSec;
+  playerState.playEndSec = endSec;
+  playerState.pausedAtSec = startSec;
+  playerState.startedAtPerf = performance.now();
+
+  updatePlaybackInfoText();
+  setStatus("再生中...");
+
   try {
-    await unlockAudio();
-
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(mediaStream);
-    recordedChunks = [];
-
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) recordedChunks.push(event.data);
-    };
-
-    mediaRecorder.onstop = async () => {
-      try {
-        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
-        const fileLike = new File([blob], "recorded_audio.webm", { type: blob.type });
-
-        if (!isAllowedAudioFile(fileLike)) {
-          setStatus("録音データ形式が不正です");
-          return;
-        }
-
-        const decoded = await decodeFileToAudioBuffer(fileLike);
-        currentMaterialName = `record_${new Date().toISOString().replace(/[:.]/g, "-")}`;
-        saveNameInput.value = currentMaterialName;
-        fileInfoEl.textContent = "マイク録音データ";
-        loadDecodedBuffer(decoded, "録音完了", "録音");
-      } catch (err) {
-        console.error(err);
-        setStatus("録音データの解析に失敗");
-        alert("録音データの読み込みに失敗しました。");
-      }
-    };
-
-    mediaRecorder.start();
-    recordingStartTime = performance.now();
-    recordingTimerId = setInterval(updateRecordingTime, 100);
-
-    recordBtn.textContent = "録音停止";
-    setStatus("録音中...");
-    fileInfoEl.textContent = "マイク録音中";
+    await playerAudio.play();
   } catch (err) {
     console.error(err);
-    setStatus("マイク利用に失敗");
-    alert("マイク利用に失敗しました。ブラウザのマイク許可を確認してください。");
-  }
-}
-
-function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(track => track.stop());
-    mediaStream = null;
-  }
-  if (recordingTimerId) {
-    clearInterval(recordingTimerId);
-    recordingTimerId = null;
+    setStatus("再生失敗");
+    alert("音声再生に失敗しました。");
+    return;
   }
 
-  recordBtn.textContent = "録音開始";
-  timeInfoEl.textContent = "録音時間: 0.0 秒";
+  stopPlaybackAnimation();
+  playbackAnimationFrame = requestAnimationFrame(animatePlayback);
 }
 
-function updateRecordingTime() {
-  const sec = (performance.now() - recordingStartTime) / 1000;
-  timeInfoEl.textContent = `録音時間: ${sec.toFixed(1)} 秒`;
-}
+playerAudio.addEventListener("ended", async () => {
+  if (!playerState.isPlaying) return;
+
+  if (playerState.loopEnabled) {
+    const mode = playerState.mode || "full";
+
+    if (mode === "selection" && selectionStart != null && selectionEnd != null) {
+      const s = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+      const e = Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+      await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "selection");
+      return;
+    }
+
+    if (mode === "edit" && editSession.startSample != null && editSession.endSample != null) {
+      const s = editSession.startSample / editedAudioBuffer.sampleRate;
+      const e = editSession.endSample / editedAudioBuffer.sampleRate;
+      await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "edit");
+      return;
+    }
+
+    await playBufferRangeWithAudioElement(editedAudioBuffer, 0, editedAudioBuffer.duration, "full");
+    return;
+  }
+
+  playerState.isPlaying = false;
+  playerState.pausedAtSec = playerState.playEndSec;
+  stopPlaybackAnimation();
+  updatePlayerUI();
+  setStatus("再生終了");
+});
 
 // ------------------------------
-// Player helpers
+// Player UI helpers
 // ------------------------------
 function getBufferDuration() {
   return editedAudioBuffer ? editedAudioBuffer.duration : 0;
@@ -1199,9 +1441,8 @@ function getModeRange(mode) {
 
 function getCurrentPlaybackSec() {
   if (!playerState.isPlaying) return playerState.pausedAtSec || 0;
-  const elapsedRealSec = (performance.now() - playerState.startedAtPerf) / 1000;
-  const progressedAudioSec = elapsedRealSec * playerState.playbackRate;
-  return clamp(playerState.playStartSec + progressedAudioSec, 0, playerState.playEndSec);
+  const elapsed = playerAudio.currentTime || 0;
+  return clamp(playerState.playStartSec + elapsed, 0, playerState.playEndSec);
 }
 
 function stopPlaybackAnimation() {
@@ -1234,106 +1475,29 @@ function updatePlayerUI() {
 function animatePlayback() {
   updatePlayerUI();
   if (!playerState.isPlaying) return;
-
-  const cur = getCurrentPlaybackSec();
-  if (cur >= playerState.playEndSec - 0.002) {
-    updatePlayerUI();
-    return;
-  }
-
   playbackAnimationFrame = requestAnimationFrame(animatePlayback);
-}
-
-async function startPlaybackFrom(positionSec, mode = "full") {
-  if (!editedAudioBuffer) return;
-
-  await unlockAudio();
-  stopCurrentSourceOnly();
-
-  const { startSec: rangeStart, endSec: rangeEnd } = getModeRange(mode);
-  const startSec = clamp(positionSec, rangeStart, rangeEnd);
-  const endSec = rangeEnd;
-
-  if (endSec <= startSec) {
-    setStatus("再生範囲が不正です");
-    return;
-  }
-
-  const source = audioContext.createBufferSource();
-  const gainNode = audioContext.createGain();
-  source.buffer = editedAudioBuffer;
-  source.playbackRate.value = playerState.playbackRate;
-  gainNode.gain.value = 1.0;
-  source.connect(gainNode);
-  gainNode.connect(audioContext.destination);
-
-  currentSourceNode = source;
-  currentGainNode = gainNode;
-
-  playerState.isPlaying = true;
-  playerState.mode = mode;
-  playerState.lastMode = mode;
-  playerState.playStartSec = startSec;
-  playerState.playEndSec = endSec;
-  playerState.pausedAtSec = startSec;
-  playerState.startedAtPerf = performance.now();
-
-  updatePlaybackInfoText();
-  setStatus("再生中...");
-
-  source.onended = () => {
-    if (currentSourceNode !== source) return;
-    if (!playerState.isPlaying) return;
-
-    if (playerState.loopEnabled) {
-      startPlaybackFrom(rangeStart, mode);
-    } else {
-      playerState.isPlaying = false;
-      playerState.pausedAtSec = rangeEnd;
-      stopCurrentSourceOnly();
-      stopPlaybackAnimation();
-      setStatus("再生終了");
-      updatePlayerUI();
-    }
-  };
-
-  try {
-    source.start(0, startSec, (endSec - startSec) / playerState.playbackRate);
-  } catch (err) {
-    console.error(err);
-    setStatus("再生失敗");
-    alert("再生に失敗しました。");
-    return;
-  }
-
-  stopPlaybackAnimation();
-  playbackAnimationFrame = requestAnimationFrame(animatePlayback);
-  updatePlayerUI();
-}
-
-function stopCurrentSourceOnly() {
-  if (currentSourceNode) {
-    try { currentSourceNode.stop(); } catch (_) {}
-  }
-  currentSourceNode = null;
-  currentGainNode = null;
 }
 
 function pausePlayback() {
   if (!playerState.isPlaying) return;
 
-  playerState.pausedAtSec = getCurrentPlaybackSec();
+  try {
+    playerAudio.pause();
+  } catch (_) {}
+
+  const elapsed = playerAudio.currentTime || 0;
+  playerState.pausedAtSec = playerState.playStartSec + elapsed;
   playerState.isPlaying = false;
-  stopCurrentSourceOnly();
+
   stopPlaybackAnimation();
   setStatus("一時停止");
   updatePlayerUI();
 }
 
 function stopPlayback(fromEnded = false) {
-  if (playerState.isPlaying || currentSourceNode) stopCurrentSourceOnly();
-
+  stopCurrentSourceOnly();
   stopPlaybackAnimation();
+
   playerState.isPlaying = false;
   playerState.mode = "none";
   playerState.playStartSec = 0;
@@ -1354,92 +1518,88 @@ function stopPlayback(fromEnded = false) {
 
 async function playCurrent() {
   if (!editedAudioBuffer) return;
+
   const mode = playerState.lastMode || "full";
-  const { startSec, endSec } = getModeRange(mode);
-  const start = clamp(playerState.pausedAtSec || startSec, startSec, endSec);
-  await startPlaybackFrom(start, mode);
+
+  if (mode === "selection" && selectionStart != null && selectionEnd != null) {
+    const s = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+    const e = Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+    await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "selection");
+    return;
+  }
+
+  if (mode === "edit" && editSession.startSample != null && editSession.endSample != null) {
+    const s = editSession.startSample / editedAudioBuffer.sampleRate;
+    const e = editSession.endSample / editedAudioBuffer.sampleRate;
+    await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "edit");
+    return;
+  }
+
+  await playBufferRangeWithAudioElement(editedAudioBuffer, 0, editedAudioBuffer.duration, "full");
 }
 
 async function playSelection() {
   if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
-  const start = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+
+  const s = Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
+  const e = Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate;
   playerState.lastMode = "selection";
   updatePlaybackInfoText();
-  await startPlaybackFrom(start, "selection");
+  await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "selection");
 }
 
 async function playEditRange() {
-  if (!isEditMode || !editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
-  const start = editSession.startSample / editedAudioBuffer.sampleRate;
+  if (!editedAudioBuffer || editSession.startSample == null || editSession.endSample == null) return;
+
+  const s = editSession.startSample / editedAudioBuffer.sampleRate;
+  const e = editSession.endSample / editedAudioBuffer.sampleRate;
   playerState.lastMode = "edit";
   updatePlaybackInfoText();
-  await startPlaybackFrom(start, "edit");
+  await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "edit");
 }
 
 async function playContinuousRegions() {
   if (!editedAudioBuffer || !analysisState.continuousRegions.length) return;
 
   const first = analysisState.continuousRegions[0];
-  const startSec = first.startSample / editedAudioBuffer.sampleRate;
-  const endSec = first.endSample / editedAudioBuffer.sampleRate;
+  const s = first.startSample / editedAudioBuffer.sampleRate;
+  const e = first.endSample / editedAudioBuffer.sampleRate;
 
   playerState.lastMode = "full";
-  await startPlaybackFrom(startSec, "full");
-  playerState.playEndSec = endSec;
+  await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "full");
   setStatus("連続区間を再生中");
 }
 
 async function playSelectedUnit() {
   if (!editedAudioBuffer || groupState.selectedCycleStart == null || groupState.selectedCycleEnd == null) return;
 
-  const startSec = groupState.selectedCycleStart / editedAudioBuffer.sampleRate;
-  const endSec = groupState.selectedCycleEnd / editedAudioBuffer.sampleRate;
-
+  const s = groupState.selectedCycleStart / editedAudioBuffer.sampleRate;
+  const e = groupState.selectedCycleEnd / editedAudioBuffer.sampleRate;
   playerState.lastMode = "full";
-  await startPlaybackFrom(startSec, "full");
-  playerState.playEndSec = endSec;
+  await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "full");
   setStatus("代表周期を再生中");
 }
 
 async function playGroup() {
   if (!editedAudioBuffer || groupState.groupStartSample == null || groupState.groupEndSample == null) return;
 
-  const startSec = groupState.groupStartSample / editedAudioBuffer.sampleRate;
-  const endSec = groupState.groupEndSample / editedAudioBuffer.sampleRate;
-
+  const s = groupState.groupStartSample / editedAudioBuffer.sampleRate;
+  const e = groupState.groupEndSample / editedAudioBuffer.sampleRate;
   playerState.lastMode = "full";
-  await startPlaybackFrom(startSec, "full");
-  playerState.playEndSec = endSec;
+  await playBufferRangeWithAudioElement(editedAudioBuffer, s, e, "full");
   setStatus("周期グループを再生中");
 }
 
 function seekTo(sec) {
   if (!editedAudioBuffer) return;
-
-  const mode = playerState.isPlaying ? playerState.mode : (playerState.lastMode || "full");
-  const { startSec, endSec } = getModeRange(mode);
-  const newSec = clamp(sec, startSec, endSec);
-  playerState.pausedAtSec = newSec;
-
-  if (playerState.isPlaying) startPlaybackFrom(newSec, mode);
-  else updatePlayerUI();
+  playerState.pausedAtSec = clamp(sec, 0, editedAudioBuffer.duration);
+  updatePlayerUI();
 }
 
 function skipBy(deltaSec) {
   if (!editedAudioBuffer) return;
-
-  const mode = playerState.isPlaying ? playerState.mode : (playerState.lastMode || "full");
-  const { startSec, endSec } = getModeRange(mode);
   const cur = getCurrentPlaybackSec();
-  seekTo(clamp(cur + deltaSec, startSec, endSec));
-}
-
-function toggleLoop() {
-  playerState.loopEnabled = !playerState.loopEnabled;
-  const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
-  loopToggleBtn.textContent = label;
-  editLoopToggleBtn.textContent = label;
-  updatePlaybackInfoText();
+  seekTo(clamp(cur + deltaSec, 0, editedAudioBuffer.duration));
 }
 
 // ------------------------------
@@ -1913,9 +2073,6 @@ function drawEditWaveform() {
   }
 }
 
-// ------------------------------
-// Unit drawing
-// ------------------------------
 function drawUnitWaveform() {
   const width = unitWaveCanvas.clientWidth;
   const height = unitWaveCanvas.clientHeight;
@@ -1965,340 +2122,6 @@ function drawUnitWaveform() {
 }
 
 // ------------------------------
-// Edit mode
-// ------------------------------
-function updateEditorInfo() {
-  if (editSession.startSample == null || editSession.endSample == null || !editedAudioBuffer) {
-    editorRangeInfo.textContent = "編集範囲: -";
-    return;
-  }
-
-  const s = editSession.startSample / editedAudioBuffer.sampleRate;
-  const e = editSession.endSample / editedAudioBuffer.sampleRate;
-  editorRangeInfo.textContent = `編集範囲: ${s.toFixed(4)}s ～ ${e.toFixed(4)}s`;
-}
-
-function openEditMode() {
-  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
-
-  const s = Math.min(selectionStart, selectionEnd);
-  const e = Math.max(selectionStart, selectionEnd);
-  if (e - s < 2) {
-    alert("編集範囲が短すぎます。");
-    return;
-  }
-
-  editSession.startSample = s;
-  editSession.endSample = e;
-  editSession.viewStartSample = s;
-  editSession.viewEndSample = e;
-  editSession.precisionMode = false;
-  editSession.overlayMode = "overlay";
-  editSession.snapshotBeforeEdit = cloneAudioBuffer(editedAudioBuffer);
-
-  clearGroup();
-
-  isEditMode = true;
-  editorPanel.classList.remove("hidden");
-  playerState.lastMode = "edit";
-  setUnitEditMode("navigate");
-  updateEditorInfo();
-  updatePlaybackInfoText();
-  updatePrecisionButton();
-  updateOverlayButton();
-  drawEditWaveform();
-  drawUnitWaveform();
-  setStatus("編集モード");
-}
-
-function cancelEditMode() {
-  if (editSession.snapshotBeforeEdit) {
-    editedAudioBuffer = cloneAudioBuffer(editSession.snapshotBeforeEdit);
-  }
-
-  editSession.startSample = null;
-  editSession.endSample = null;
-  editSession.viewStartSample = null;
-  editSession.viewEndSample = null;
-  editSession.precisionMode = false;
-  editSession.overlayMode = "overlay";
-  editSession.snapshotBeforeEdit = null;
-
-  clearGroup();
-
-  isEditMode = false;
-  editorPanel.classList.add("hidden");
-  playerState.lastMode = "selection";
-  updatePrecisionButton();
-  updateOverlayButton();
-  updatePlaybackInfoText();
-  drawMainWaveform();
-  drawEditWaveform();
-  drawUnitWaveform();
-  setStatus("編集キャンセル");
-}
-
-function applyEditMode() {
-  editSession.startSample = null;
-  editSession.endSample = null;
-  editSession.viewStartSample = null;
-  editSession.viewEndSample = null;
-  editSession.precisionMode = false;
-  editSession.overlayMode = "overlay";
-  editSession.snapshotBeforeEdit = null;
-
-  clearGroup();
-
-  isEditMode = false;
-  editorPanel.classList.add("hidden");
-  playerState.lastMode = "selection";
-  updatePrecisionButton();
-  updateOverlayButton();
-  updatePlaybackInfoText();
-  drawMainWaveform();
-  drawEditWaveform();
-  drawUnitWaveform();
-  setStatus("編集確定");
-}
-
-// ------------------------------
-// Save / export
-// ------------------------------
-function createSelectionAudioBuffer() {
-  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return null;
-
-  const startSample = Math.min(selectionStart, selectionEnd);
-  const endSample = Math.max(selectionStart, selectionEnd);
-  const length = endSample - startSample;
-  if (length <= 0) return null;
-
-  const slicedBuffer = audioContext.createBuffer(
-    editedAudioBuffer.numberOfChannels,
-    length,
-    editedAudioBuffer.sampleRate
-  );
-
-  for (let ch = 0; ch < editedAudioBuffer.numberOfChannels; ch++) {
-    const sourceData = editedAudioBuffer.getChannelData(ch);
-    const targetData = slicedBuffer.getChannelData(ch);
-    targetData.set(sourceData.slice(startSample, endSample));
-  }
-
-  return slicedBuffer;
-}
-
-async function saveCurrentMaterial(asEditedCopy = false) {
-  if (!originalAudioBuffer || !editedAudioBuffer) return;
-
-  const baseName = saveNameInput.value.trim() || currentMaterialName || "untitled";
-  const finalName = asEditedCopy ? `${baseName}_edited_${Date.now()}` : baseName;
-
-  const material = {
-    id: generateId(),
-    name: finalName,
-    source: currentMaterialSource || "不明",
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    original: audioBufferToChannelArrays(originalAudioBuffer),
-    edited: audioBufferToChannelArrays(editedAudioBuffer),
-  };
-
-  await dbPutMaterial(material);
-  setStatus(asEditedCopy ? "編集版を保存しました" : "保存しました");
-  await refreshLibrary();
-}
-
-async function loadMaterialFromDB(id) {
-  try {
-    const item = await dbGetMaterial(id);
-    if (!item) return;
-
-    await unlockAudio();
-    originalAudioBuffer = channelArraysToAudioBuffer(item.original);
-    editedAudioBuffer = channelArraysToAudioBuffer(item.edited);
-
-    currentMaterialName = item.name || "";
-    currentMaterialSource = item.source || "";
-    saveNameInput.value = currentMaterialName;
-    fileInfoEl.textContent = `ライブラリ: ${item.name}`;
-
-    analysisState.continuousRegions = [];
-    analysisState.transientEvents = [];
-    clearGroup();
-    resetView();
-    resetSelectionDefault();
-    stopPlayback();
-
-    isEditMode = false;
-    editorPanel.classList.add("hidden");
-    editSession.startSample = null;
-    editSession.endSample = null;
-    editSession.viewStartSample = null;
-    editSession.viewEndSample = null;
-    editSession.precisionMode = false;
-    editSession.overlayMode = "overlay";
-    editSession.snapshotBeforeEdit = null;
-
-    setUnitEditMode("navigate");
-    updatePrecisionButton();
-    updateOverlayButton();
-
-    drawMainWaveform();
-    drawEditWaveform();
-    drawUnitWaveform();
-    updateMainUIState();
-    setStatus("素材を読み込みました");
-  } catch (err) {
-    console.error(err);
-    alert("保存済み素材の読み込みに失敗しました。");
-  }
-}
-
-async function duplicateMaterial(id) {
-  const item = await dbGetMaterial(id);
-  if (!item) return;
-
-  const duplicated = {
-    ...item,
-    id: generateId(),
-    name: `${item.name}_copy`,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-
-  await dbPutMaterial(duplicated);
-  setStatus("素材を複製しました");
-  await refreshLibrary();
-}
-
-async function deleteMaterial(id) {
-  const ok = confirm("この素材を削除しますか？");
-  if (!ok) return;
-  await dbDeleteMaterial(id);
-  setStatus("素材を削除しました");
-  await refreshLibrary();
-}
-
-async function refreshLibrary() {
-  try {
-    const items = await dbGetAllMaterials();
-
-    if (!items.length) {
-      libraryList.innerHTML = `<div class="library-item"><div class="library-meta">保存済み素材はありません。</div></div>`;
-      return;
-    }
-
-    libraryList.innerHTML = items.map(item => {
-      const durSec = item.edited?.sampleRate ? (item.edited.length / item.edited.sampleRate).toFixed(2) : "-";
-      return `
-        <div class="library-item">
-          <div class="library-item-head">
-            <div>
-              <div class="library-title">${escapeHtml(item.name || "(no name)")}</div>
-              <div class="library-meta">
-                種別: ${escapeHtml(item.source || "-")}<br>
-                長さ: ${durSec}s<br>
-                更新: ${escapeHtml(formatDate(item.updatedAt))}
-              </div>
-            </div>
-          </div>
-          <div class="library-actions">
-            <button data-action="load" data-id="${item.id}">読み込み</button>
-            <button data-action="duplicate" data-id="${item.id}">複製</button>
-            <button data-action="delete" data-id="${item.id}">削除</button>
-          </div>
-        </div>
-      `;
-    }).join("");
-  } catch (err) {
-    console.error(err);
-    libraryList.innerHTML = `<div class="library-item"><div class="library-meta">ライブラリ読込に失敗しました。</div></div>`;
-  }
-}
-
-function writeString(view, offset, str) {
-  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-}
-
-function audioBufferToWavBlob(buffer) {
-  const numChannels = buffer.numberOfChannels;
-  const sampleRate = buffer.sampleRate;
-  const bitDepth = 16;
-  const blockAlign = (numChannels * bitDepth) / 8;
-  const byteRate = sampleRate * blockAlign;
-  const dataSize = buffer.length * blockAlign;
-  const arrayBuffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(arrayBuffer);
-
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitDepth, true);
-  writeString(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-
-  let offset = 44;
-  const channels = [];
-  for (let ch = 0; ch < numChannels; ch++) channels.push(buffer.getChannelData(ch));
-
-  for (let i = 0; i < buffer.length; i++) {
-    for (let ch = 0; ch < numChannels; ch++) {
-      let sample = clamp(channels[ch][i], -1, 1);
-      sample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-      view.setInt16(offset, sample, true);
-      offset += 2;
-    }
-  }
-
-  return new Blob([arrayBuffer], { type: "audio/wav" });
-}
-
-function exportEditedWav() {
-  if (!editedAudioBuffer) return;
-
-  const blob = audioBufferToWavBlob(editedAudioBuffer);
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${saveNameInput.value.trim() || "edited_voice"}.wav`;
-  a.click();
-
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  setStatus("WAVを書き出しました");
-}
-
-function exportSelectionWav() {
-  if (!editedAudioBuffer || selectionStart == null || selectionEnd == null) return;
-
-  const selectionBuffer = createSelectionAudioBuffer();
-  if (!selectionBuffer) {
-    alert("選択範囲が正しくありません。");
-    return;
-  }
-
-  const blob = audioBufferToWavBlob(selectionBuffer);
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-
-  const startSec = (Math.min(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate).toFixed(4);
-  const endSec = (Math.max(selectionStart, selectionEnd) / editedAudioBuffer.sampleRate).toFixed(4);
-
-  a.href = url;
-  a.download = `${saveNameInput.value.trim() || "selection"}_${startSec}s-${endSec}s.wav`;
-  a.click();
-
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  setStatus("選択範囲を書き出しました");
-}
-
-// ------------------------------
 // UI state
 // ------------------------------
 function updateAnalysisButtons() {
@@ -2307,17 +2130,6 @@ function updateAnalysisButtons() {
     !analysisState.continuousRegions.length &&
     !analysisState.transientEvents.length &&
     !groupState.cycleCount;
-}
-
-function updateGroupButtons() {
-  const hasUnit = !!groupState.unitEdited;
-  const hasGroup = groupState.cycleCount > 0;
-
-  playUnitBtn.disabled = !hasUnit;
-  groupPlayBtn.disabled = !hasGroup;
-  clearGroupBtn.disabled = !hasGroup;
-  unitEditModeBtn.disabled = !hasUnit;
-  applyUnitToGroupBtn.disabled = !hasUnit || !hasGroup;
 }
 
 function updateMainUIState() {
@@ -2382,7 +2194,7 @@ function updateMainUIState() {
 }
 
 // ------------------------------
-// Main canvas interaction
+// Main view interactions
 // ------------------------------
 mainCanvas.addEventListener("pointerdown", async (event) => {
   if (!editedAudioBuffer || isEditMode) return;
@@ -2542,7 +2354,7 @@ mainCanvas.addEventListener("pointercancel", (event) => {
 });
 
 // ------------------------------
-// Edit canvas interaction
+// Edit view interactions
 // ------------------------------
 editCanvas.addEventListener("pointerdown", async (event) => {
   if (!isEditMode || !editedAudioBuffer) return;
@@ -2643,48 +2455,8 @@ editCanvas.addEventListener("pointercancel", (event) => {
 });
 
 // ------------------------------
-// Unit canvas interaction
+// Unit view interactions
 // ------------------------------
-function getUnitCanvasLocalPos(event) {
-  const rect = unitWaveCanvas.getBoundingClientRect();
-  return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
-  };
-}
-
-function unitCanvasXToIndex(x) {
-  if (!groupState.unitEdited) return 0;
-  const width = unitWaveCanvas.clientWidth;
-  const ratio = clamp(x / Math.max(1, width), 0, 1);
-  return Math.floor(ratio * (groupState.unitEdited.length - 1));
-}
-
-function unitCanvasYToAmplitude(y) {
-  const height = unitWaveCanvas.clientHeight;
-  return clamp(1 - (y / Math.max(1, height)) * 2, -1, 1);
-}
-
-function applyUnitBrushAt(x, y) {
-  if (!groupState.unitEdited) return;
-
-  const idx = unitCanvasXToIndex(x);
-  const amp = unitCanvasYToAmplitude(y);
-  const radius = parseInt(unitBrushSizeInput.value, 10);
-  const strength = parseInt(unitStrengthInput.value, 10) / 100;
-
-  const data = groupState.unitEdited;
-  const start = Math.max(0, idx - radius);
-  const end = Math.min(data.length - 1, idx + radius);
-
-  for (let i = start; i <= end; i++) {
-    const dist = Math.abs(i - idx) / Math.max(1, radius);
-    const weight = Math.max(0, 1 - dist);
-    const mix = weight * strength;
-    data[i] = clampSample(data[i] * (1 - mix) + amp * mix);
-  }
-}
-
 unitWaveCanvas.addEventListener("pointerdown", async (event) => {
   if (!groupState.unitEdited) return;
   await unlockAudio();
@@ -2766,8 +2538,20 @@ pauseBtn.addEventListener("click", pausePlayback);
 stopBtn.addEventListener("click", () => stopPlayback(false));
 rewindBtn.addEventListener("click", () => skipBy(-10));
 forwardBtn.addEventListener("click", () => skipBy(10));
-loopToggleBtn.addEventListener("click", toggleLoop);
-editLoopToggleBtn.addEventListener("click", toggleLoop);
+loopToggleBtn.addEventListener("click", () => {
+  playerState.loopEnabled = !playerState.loopEnabled;
+  const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
+  loopToggleBtn.textContent = label;
+  editLoopToggleBtn.textContent = label;
+  updatePlaybackInfoText();
+});
+editLoopToggleBtn.addEventListener("click", () => {
+  playerState.loopEnabled = !playerState.loopEnabled;
+  const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
+  loopToggleBtn.textContent = label;
+  editLoopToggleBtn.textContent = label;
+  updatePlaybackInfoText();
+});
 
 playSelectionBtn.addEventListener("click", playSelection);
 saveSelectionWavBtn.addEventListener("click", exportSelectionWav);
@@ -2877,67 +2661,161 @@ libraryList.addEventListener("click", async (event) => {
 });
 
 // ------------------------------
-// UI state
+// File loading
 // ------------------------------
-function updateMainUIState() {
-  const hasAudio = !!editedAudioBuffer;
-  const hasSelection = hasAudio && selectionStart != null && selectionEnd != null;
+async function decodeFileToAudioBuffer(file) {
+  await unlockAudio();
+  const arrayBuffer = await file.arrayBuffer();
+  return await audioContext.decodeAudioData(arrayBuffer.slice(0));
+}
 
-  playBtn.disabled = !hasAudio;
-  pauseBtn.disabled = !hasAudio;
-  rewindBtn.disabled = !hasAudio;
-  forwardBtn.disabled = !hasAudio;
-  stopBtn.disabled = !hasAudio;
-  seekBar.disabled = !hasAudio;
-  loopToggleBtn.disabled = !hasAudio;
-  speedSlider.disabled = !hasAudio;
-
-  scrollLeftBtn.disabled = !hasAudio;
-  scrollRightBtn.disabled = !hasAudio;
-  zoomInBtn.disabled = !hasAudio;
-  zoomOutBtn.disabled = !hasAudio;
-  fullViewBtn.disabled = !hasAudio;
-
-  playSelectionBtn.disabled = !hasSelection;
-  zoomToSelectionBtn.disabled = !hasSelection;
-  saveSelectionWavBtn.disabled = !hasSelection;
-  resetSelectionBtn.disabled = !hasSelection;
-  openEditorBtn.disabled = !hasSelection;
-
-  saveCurrentBtn.disabled = !hasAudio;
-  saveEditedAsBtn.disabled = !hasAudio;
-  saveWavBtn.disabled = !hasAudio;
-
-  editPlayBtn.disabled = !hasAudio;
-  editPauseBtn.disabled = !hasAudio;
-  editStopBtn.disabled = !hasAudio;
-  editLoopToggleBtn.disabled = !hasAudio;
-  editZoomInBtn.disabled = !isEditMode;
-  editZoomOutBtn.disabled = !isEditMode;
-  editFullViewBtn.disabled = !isEditMode;
-  precisionToggleBtn.disabled = !isEditMode;
-  overlayModeBtn.disabled = !isEditMode;
-  analyzeSelectionBtn.disabled = !isEditMode;
-
-  if (!hasAudio) {
-    seekBar.value = 0;
-    currentTimeLabel.textContent = "0.00s";
-    durationLabel.textContent = "0.00s";
-    playbackTimeInfoEl.textContent = "再生位置: -";
-  } else {
-    seekBar.max = 1;
-    updatePlayerUI();
+function resetSelectionDefault() {
+  if (!editedAudioBuffer) {
+    selectionStart = null;
+    selectionEnd = null;
+    return;
   }
 
-  const label = `ループ: ${playerState.loopEnabled ? "ON" : "OFF"}`;
-  loopToggleBtn.textContent = label;
-  editLoopToggleBtn.textContent = label;
+  const len = editedAudioBuffer.length;
+  selectionStart = Math.floor(len * 0.25);
+  selectionEnd = Math.floor(len * 0.35);
+  updateSelectionInfo();
+}
 
-  updatePlaybackInfoText();
-  updatePrecisionButton();
-  updateOverlayButton();
-  updateAnalysisButtons();
-  updateGroupButtons();
+function loadDecodedBuffer(decoded, label = "読込完了", source = "") {
+  originalAudioBuffer = toMonoBuffer(decoded);
+  editedAudioBuffer = cloneAudioBuffer(originalAudioBuffer);
+
+  currentMaterialSource = source;
+  currentMaterialName = currentMaterialName || label;
+  saveNameInput.value = currentMaterialName;
+
+  analysisState.continuousRegions = [];
+  analysisState.transientEvents = [];
+  clearGroup();
+  resetView();
+  resetSelectionDefault();
+  stopPlayback();
+  updateMainUIState();
+  drawMainWaveform();
+  drawEditWaveform();
+  setStatus(label);
+  fileInfoEl.textContent = `${source}: ${currentMaterialName}`;
+}
+
+async function handleFileLoad(file, sourceLabel = "音声ファイル") {
+  if (!file) return;
+
+  currentMaterialName = file.name;
+  saveNameInput.value = file.name;
+  fileInfoEl.textContent = `${sourceLabel}: ${file.name} / ${file.type || "type不明"}`;
+  setStatus("ファイル読込中...");
+
+  try {
+    const decoded = await decodeFileToAudioBuffer(file);
+    loadDecodedBuffer(decoded, `${sourceLabel}読込完了`, sourceLabel);
+  } catch (err) {
+    console.error(err);
+    setStatus("ファイル読込失敗");
+    alert("読み込みに失敗しました。mp3 / wav / m4a などで試してください。");
+  }
+}
+
+window.handleAudioFileInline = async function (event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  if (!isAllowedAudioFile(file)) {
+    alert("音声ファイルのみ選択できます。");
+    fileInfoEl.textContent = "音声以外のファイルは読み込めません";
+    setStatus("音声ファイルを選択してください");
+    event.target.value = "";
+    return;
+  }
+
+  fileInfoEl.textContent = `音声ファイル: ${file.name} / ${file.type || "type不明"}`;
+  setStatus("ファイル読込中...");
+
+  try {
+    await handleFileLoad(file, "音声ファイル");
+  } catch (err) {
+    console.error(err);
+    setStatus("ファイル読込失敗");
+    alert("ファイルの読み込みに失敗しました。");
+  }
+
+  event.target.value = "";
+};
+
+// ------------------------------
+// Recording
+// ------------------------------
+async function startRecording() {
+  try {
+    await unlockAudio();
+
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(mediaStream);
+    recordedChunks = [];
+
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) recordedChunks.push(event.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      try {
+        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+        const fileLike = new File([blob], "recorded_audio.webm", { type: blob.type });
+
+        if (!isAllowedAudioFile(fileLike)) {
+          setStatus("録音データ形式が不正です");
+          return;
+        }
+
+        const decoded = await decodeFileToAudioBuffer(fileLike);
+        currentMaterialName = `record_${new Date().toISOString().replace(/[:.]/g, "-")}`;
+        saveNameInput.value = currentMaterialName;
+        fileInfoEl.textContent = "マイク録音データ";
+        loadDecodedBuffer(decoded, "録音完了", "録音");
+      } catch (err) {
+        console.error(err);
+        setStatus("録音データの解析に失敗");
+        alert("録音データの読み込みに失敗しました。");
+      }
+    };
+
+    mediaRecorder.start();
+    recordingStartTime = performance.now();
+    recordingTimerId = setInterval(updateRecordingTime, 100);
+
+    recordBtn.textContent = "録音停止";
+    setStatus("録音中...");
+    fileInfoEl.textContent = "マイク録音中";
+  } catch (err) {
+    console.error(err);
+    setStatus("マイク利用に失敗");
+    alert("マイク利用に失敗しました。ブラウザのマイク許可を確認してください。");
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(track => track.stop());
+    mediaStream = null;
+  }
+  if (recordingTimerId) {
+    clearInterval(recordingTimerId);
+    recordingTimerId = null;
+  }
+
+  recordBtn.textContent = "録音開始";
+  timeInfoEl.textContent = "録音時間: 0.0 秒";
+}
+
+function updateRecordingTime() {
+  const sec = (performance.now() - recordingStartTime) / 1000;
+  timeInfoEl.textContent = `録音時間: ${sec.toFixed(1)} 秒`;
 }
 
 // ------------------------------
